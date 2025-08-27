@@ -112,7 +112,7 @@ jobs:
     runs-on: windows-latest
     needs: resolve-dependencies
     env:
-      BHoMFolder: "C:\ProgramData\BHoM"
+      BHoMFolder: "C:\\ProgramData\\BHoM"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
