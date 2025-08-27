@@ -1,0 +1,311 @@
+name: BHoM Build Workflow
+
+on:
+  workflow_call:
+    inputs:
+      repository_name:
+        description: 'Name of the repository being built'
+        required: true
+        type: string
+      branch_name:
+        description: 'Branch name being built'
+        required: true
+        type: string
+      dotnet_version:
+        description: '.NET version to use'
+        required: false
+        type: string
+        default: '6.0.x'
+      build_configuration:
+        description: 'Build configuration (Debug/Release)'
+        required: false
+        type: string
+        default: 'Release'
+    secrets:
+      GH_TOKEN:
+        description: 'GitHub token with repo access'
+        required: true
+
+jobs:
+  resolve-dependencies:
+    runs-on: ubuntu-latest
+    outputs:
+      dependencies: ${{ steps.parse-deps.outputs.dependencies }}
+      artifacts-downloaded: ${{ steps.download-deps.outputs.artifacts-downloaded }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Parse dependencies
+        id: parse-deps
+        run: |
+          if [ -f "dependencies.txt" ]; then
+            # Convert dependencies.txt to JSON array
+            deps=$(cat dependencies.txt | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            echo "dependencies=$deps" >> $GITHUB_OUTPUT
+            echo "Found dependencies: $deps"
+          else
+            echo "dependencies=[]" >> $GITHUB_OUTPUT
+            echo "No dependencies.txt found"
+          fi
+
+      - name: Download dependency artifacts
+        id: download-deps
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          dependencies='${{ steps.parse-deps.outputs.dependencies }}'
+          branch_name='${{ inputs.branch_name }}'
+          downloaded_artifacts=""
+          
+          if [ "$dependencies" != "[]" ]; then
+            echo "Resolving dependencies for branch: $branch_name"
+            
+            for dep in $(echo "$dependencies" | jq -r '.[]'); do
+              echo "Processing dependency: $dep"
+              
+              # Try to find artifact for current branch first, then develop
+              for target_branch in "$branch_name" "develop"; do
+                echo "Checking for artifacts on branch: $target_branch"
+                
+                # Get latest workflow run for the target branch
+                run_id=$(gh api \
+                  -H "Accept: application/vnd.github+json" \
+                  "/repos/$dep/actions/runs" \
+                  --jq ".workflow_runs[] | select(.head_branch == \"$target_branch\" and .conclusion == \"success\") | .id" \
+                  | head -1)
+                
+                if [ -n "$run_id" ]; then
+                  echo "Found successful run: $run_id for $dep on $target_branch"
+                  
+                  # Download artifacts from this run
+                  artifact_name="build-outputs-$target_branch"
+                  
+                  # Check if artifact exists and download
+                  if gh api "/repos/$dep/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == \"$artifact_name\") | .id" | head -1 > /dev/null; then
+                    echo "Downloading artifact: $artifact_name from $dep"
+                    gh api "/repos/$dep/actions/runs/$run_id/artifacts" \
+                      --jq ".artifacts[] | select(.name == \"$artifact_name\") | .archive_download_url" \
+                      | head -1 \
+                      | xargs -I {} gh api {} > "${dep//\//_}_artifact.zip"
+                    
+                    # Extract to dependency-specific folder
+                    mkdir -p "dependencies/${dep//\//_}"
+                    unzip -q "${dep//\//_}_artifact.zip" -d "dependencies/${dep//\//_}/"
+                    
+                    downloaded_artifacts="$downloaded_artifacts,$dep"
+                    echo "Successfully downloaded artifact for $dep from $target_branch"
+                    break
+                  fi
+                fi
+              done
+              
+              if [[ "$downloaded_artifacts" != *"$dep"* ]]; then
+                echo "No suitable artifact found for $dep - will need to build"
+              fi
+            done
+          fi
+          
+          echo "artifacts-downloaded=${downloaded_artifacts#,}" >> $GITHUB_OUTPUT
+
+  build:
+    runs-on: windows-latest
+    needs: resolve-dependencies
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ inputs.dotnet_version }}
+
+      - name: Restore dependencies artifacts
+        if: needs.resolve-dependencies.outputs.artifacts-downloaded != ''
+        run: |
+          # Ensure BHoM folder exists
+          New-Item -ItemType Directory -Force -Path "C:\ProgramData\BHoM"
+          
+          if (Test-Path "dependencies") {
+            Write-Host "Restoring dependency artifacts to C:\ProgramData\BHoM..."
+            
+            # Copy each dependency's artifacts directly to BHoM folder
+            Get-ChildItem "dependencies" -Directory | ForEach-Object {
+              $depName = $_.Name
+              Write-Host "Restoring dependency: $depName"
+              
+              # Copy all files from artifact to BHoM folder
+              if (Test-Path "$($_.FullName)") {
+                Copy-Item "$($_.FullName)/*" -Destination "C:\ProgramData\BHoM\" -Recurse -Force -ErrorAction SilentlyContinue
+              }
+            }
+            
+            Write-Host "Dependency artifacts restored to C:\ProgramData\BHoM"
+          }
+
+      - name: Build missing dependencies
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          $dependencies = '${{ needs.resolve-dependencies.outputs.dependencies }}' | ConvertFrom-Json
+          $downloaded = '${{ needs.resolve-dependencies.outputs.artifacts-downloaded }}' -split ','
+          
+          foreach ($dep in $dependencies) {
+            if ($downloaded -notcontains $dep) {
+              Write-Host "Building missing dependency: $dep"
+              
+              # Clone and build the dependency
+              $depFolder = $dep.Replace('/', '_')
+              git clone "https://github.com/$dep.git" "temp_$depFolder"
+              
+              Push-Location "temp_$depFolder"
+              
+              # Try to checkout matching branch, fallback to develop
+              git checkout "${{ inputs.branch_name }}" 2>$null
+              if ($LASTEXITCODE -ne 0) {
+                git checkout "develop"
+              }
+              
+              # Ensure BHoM folder exists and capture pre-build state
+              New-Item -ItemType Directory -Force -Path "C:\ProgramData\BHoM"
+              
+              # Take snapshot of BHoM folder before build
+              $preFiles = @{}
+              if (Test-Path "C:\ProgramData\BHoM") {
+                Get-ChildItem "C:\ProgramData\BHoM" -Recurse -File | ForEach-Object {
+                  $preFiles[$_.FullName] = $_.LastWriteTime
+                }
+              }
+              
+              # Build the dependency
+              dotnet restore
+              dotnet build --configuration ${{ inputs.build_configuration }} --no-restore
+              
+              # Capture changes in BHoM folder
+              $changedFiles = @()
+              if (Test-Path "C:\ProgramData\BHoM") {
+                Get-ChildItem "C:\ProgramData\BHoM" -Recurse -File | ForEach-Object {
+                  $file = $_.FullName
+                  $lastWrite = $_.LastWriteTime
+                  
+                  # File is new or modified
+                  if (-not $preFiles.ContainsKey($file) -or $preFiles[$file] -ne $lastWrite) {
+                    $changedFiles += $file
+                  }
+                }
+              }
+              
+              Write-Host "Dependency $dep modified/added $($changedFiles.Count) files in BHoM folder"
+              
+              Pop-Location
+              Remove-Item "temp_$depFolder" -Recurse -Force
+            }
+          }
+
+      - name: Take pre-build snapshot
+        run: |
+          # Ensure BHoM folder exists
+          New-Item -ItemType Directory -Force -Path "C:\ProgramData\BHoM"
+          
+          # Take snapshot of BHoM folder before build
+          $preFiles = @{}
+          if (Test-Path "C:\ProgramData\BHoM") {
+            Get-ChildItem "C:\ProgramData\BHoM" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+              $preFiles[$_.FullName] = @{
+                LastWriteTime = $_.LastWriteTime
+                Length = $_.Length
+              }
+            }
+          }
+          
+          # Save pre-build state to JSON file
+          $preFiles | ConvertTo-Json -Depth 3 | Out-File "pre-build-state.json" -Encoding UTF8
+          Write-Host "Captured pre-build state: $($preFiles.Count) files"
+
+      - name: Restore NuGet packages
+        run: dotnet restore
+
+      - name: Build project
+        run: |
+          dotnet build --configuration ${{ inputs.build_configuration }} --no-restore
+
+      - name: Run tests
+        run: |
+          dotnet test --configuration ${{ inputs.build_configuration }} --no-build --verbosity normal
+
+      - name: Package build outputs
+        run: |
+          # Load pre-build state
+          $preFiles = @{}
+          if (Test-Path "pre-build-state.json") {
+            $preFiles = Get-Content "pre-build-state.json" -Raw | ConvertFrom-Json -AsHashtable
+          }
+          
+          # Create artifact folder
+          New-Item -ItemType Directory -Force -Path "artifact"
+          
+          # Find all changed/new files in BHoM folder
+          $changedFiles = @()
+          if (Test-Path "C:\ProgramData\BHoM") {
+            Get-ChildItem "C:\ProgramData\BHoM" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+              $file = $_.FullName
+              $lastWrite = $_.LastWriteTime
+              $length = $_.Length
+              
+              # Check if file is new or modified
+              $isChanged = $false
+              if (-not $preFiles.ContainsKey($file)) {
+                # New file
+                $isChanged = $true
+                Write-Host "New file: $($file.Replace('C:\ProgramData\BHoM\', ''))"
+              } elseif ($preFiles[$file].LastWriteTime -ne $lastWrite -or $preFiles[$file].Length -ne $length) {
+                # Modified file
+                $isChanged = $true
+                Write-Host "Modified file: $($file.Replace('C:\ProgramData\BHoM\', ''))"
+              }
+              
+              if ($isChanged) {
+                $changedFiles += $file
+              }
+            }
+          }
+          
+          Write-Host "Total changed/new files: $($changedFiles.Count)"
+          
+          # Copy changed files to artifact, preserving directory structure
+          foreach ($file in $changedFiles) {
+            $relativePath = $file.Replace("C:\ProgramData\BHoM\", "")
+            $destPath = Join-Path "artifact" $relativePath
+            $destDir = Split-Path $destPath -Parent
+            
+            # Create destination directory if it doesn't exist
+            if (-not (Test-Path $destDir)) {
+              New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            }
+            
+            # Copy the file
+            Copy-Item $file -Destination $destPath -Force
+          }
+          
+          if ($changedFiles.Count -eq 0) {
+            Write-Host "No files were changed in C:\ProgramData\BHoM during build"
+            # Create empty marker file so artifact isn't empty
+            "No files changed during build" | Out-File "artifact\no-changes.txt"
+          }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-outputs-${{ inputs.branch_name }}
+          path: artifact/
+          retention-days: 30
+          compression-level: 6
+
+      - name: Upload build artifacts (develop fallback)
+        if: inputs.branch_name != 'develop'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-outputs-develop
+          path: artifact/
+          retention-days: 30
+          compression-level: 6
