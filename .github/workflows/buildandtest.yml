@@ -112,7 +112,7 @@ jobs:
     runs-on: windows-latest
     needs: resolve-dependencies
     env:
-      BHoMFolder: "$env:BHoMFolder"
+      BHoMFolder: "C:\ProgramData\BHoM"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -492,11 +492,11 @@ jobs:
               if (-not $preFiles.ContainsKey($file)) {
                 # New file
                 $isChanged = $true
-                Write-Host "New file: $($file.Replace('$env:BHoMFolder\', ''))"
+                Write-Host "New file: $($file.Replace("$env:BHoMFolder\", ''))"
               } elseif ($preFiles[$file].LastWriteTime -ne $lastWrite -or $preFiles[$file].Length -ne $length) {
                 # Modified file
                 $isChanged = $true
-                Write-Host "Modified file: $($file.Replace('$env:BHoMFolder\', ''))"
+                Write-Host "Modified file: $($file.Replace("$env:BHoMFolder\", ''))"
               }
               
               if ($isChanged) {
