@@ -115,11 +115,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ inputs.dotnet_version }}
-
       - name: Restore dependencies artifacts
         if: needs.resolve-dependencies.outputs.artifacts-downloaded != ''
         run: |
@@ -298,14 +293,5 @@ jobs:
         with:
           name: build-outputs-${{ inputs.branch_name }}
           path: artifact/
-          retention-days: 30
-          compression-level: 6
-
-      - name: Upload build artifacts (develop fallback)
-        if: inputs.branch_name != 'develop'
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-outputs-develop
-          path: artifact/
-          retention-days: 30
+          retention-days: 90
           compression-level: 6
