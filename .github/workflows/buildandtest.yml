@@ -247,38 +247,74 @@ jobs:
           }
           
           # Topological sort to determine build order
-          $buildOrder = @()
-          $visited = @{}
-          $visiting = @{}
+          $script:buildOrder = @()
+          $script:visited = @{}
+          $script:visiting = @{}
           
-          function Get-BuildOrder($repo) {
-            if ($visiting.ContainsKey($repo)) {
+          function Get-BuildOrder {
+            param([string]$repo)
+            
+            Write-Host "Processing $repo for build order..." -ForegroundColor Cyan
+            
+            if ($script:visiting.ContainsKey($repo)) {
               Write-Host "⚠ Circular dependency detected involving $repo" -ForegroundColor Yellow
-              return
+              return $false
             }
             
-            if ($visited.ContainsKey($repo)) {
-              return
+            if ($script:visited.ContainsKey($repo)) {
+              Write-Host "$repo already processed" -ForegroundColor Gray
+              return $true
             }
             
-            $visiting[$repo] = $true
+            $script:visiting[$repo] = $true
+            Write-Host "Visiting dependencies of $repo..."
             
             # Visit all dependencies first
-            foreach ($dep in $dependencyMap[$repo]) {
-              if ($validRepos -contains $dep) {
-                Get-BuildOrder $dep
+            if ($dependencyMap.ContainsKey($repo) -and $dependencyMap[$repo].Count -gt 0) {
+              Write-Host "$repo has dependencies: $($dependencyMap[$repo] -join ', ')"
+              foreach ($dep in $dependencyMap[$repo]) {
+                if ($validRepos -contains $dep) {
+                  Write-Host "Processing dependency: $dep"
+                  $result = Get-BuildOrder -repo $dep
+                  if (-not $result) {
+                    Write-Host "Failed to process dependency $dep" -ForegroundColor Red
+                    return $false
+                  }
+                } else {
+                  Write-Host "Skipping dependency $dep (not in current build set)" -ForegroundColor Yellow
+                }
               }
+            } else {
+              Write-Host "$repo has no dependencies"
             }
             
-            $visiting.Remove($repo)
-            $visited[$repo] = $true
-            $buildOrder += $repo
+            $script:visiting.Remove($repo)
+            $script:visited[$repo] = $true
+            $script:buildOrder += $repo
+            Write-Host "Added $repo to build order (position $($script:buildOrder.Count))" -ForegroundColor Green
+            return $true
           }
           
           # Process all repositories
+          Write-Host "Starting topological sort for $($validRepos.Count) repositories..."
+          $sortSuccess = $true
           foreach ($repo in $validRepos) {
-            Get-BuildOrder $repo
+            if (-not $script:visited.ContainsKey($repo)) {
+              Write-Host "Processing root repository: $repo" -ForegroundColor Magenta
+              $result = Get-BuildOrder -repo $repo
+              if (-not $result) {
+                $sortSuccess = $false
+                break
+              }
+            }
           }
+          
+          if (-not $sortSuccess) {
+            Write-Host "⚠ Topological sort failed due to circular dependencies. Using original order." -ForegroundColor Yellow
+            $script:buildOrder = $validRepos
+          }
+          
+          $buildOrder = $script:buildOrder
           
           # Save build order
           $buildOrder | Out-File "build_order.txt" -Encoding UTF8
