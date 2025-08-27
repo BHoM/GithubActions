@@ -224,10 +224,6 @@ jobs:
         run: |
           dotnet build --configuration ${{ inputs.build_configuration }} --no-restore
 
-      - name: Run tests
-        run: |
-          dotnet test --configuration ${{ inputs.build_configuration }} --no-build --verbosity normal
-
       - name: Package build outputs
         run: |
           # Load pre-build state
@@ -295,3 +291,8 @@ jobs:
           path: artifact/
           retention-days: 90
           compression-level: 6
+
+      - name: Run tests
+        run: |
+          dotnet test --configuration ${{ inputs.build_configuration }} --no-build --verbosity normal
+  
