@@ -169,13 +169,13 @@ jobs:
               
               try {
                 git clone $repo_url "Repositories\$repo_name"
-                
-                # Try to checkout matching branch, fallback to develop
+              
+              # Try to checkout matching branch, fallback to develop
                 Push-Location "Repositories\$repo_name"
-                git checkout "${{ inputs.branch_name }}" 2>$null
-                if ($LASTEXITCODE -ne 0) {
-                  git checkout "develop"
-                }
+              git checkout "${{ inputs.branch_name }}" 2>$null
+              if ($LASTEXITCODE -ne 0) {
+                git checkout "develop"
+              }
                 Pop-Location
                 
                 Write-Host "Successfully cloned $repo_name"
@@ -347,15 +347,15 @@ jobs:
           # Compile each repository in the correct order
           foreach ($repo_name in $buildOrder) {
             Write-Host "Compiling repository: $repo_name"
-            
-            # Take snapshot of BHoM folder before build
-            $preFiles = @{}
+              
+              # Take snapshot of BHoM folder before build
+              $preFiles = @{}
             if (Test-Path "$env:BHoMFolder") {
               Get-ChildItem "$env:BHoMFolder" -Recurse -File | ForEach-Object {
-                $preFiles[$_.FullName] = $_.LastWriteTime
+                  $preFiles[$_.FullName] = $_.LastWriteTime
+                }
               }
-            }
-            
+              
             Push-Location "Repositories\$repo_name"
             
             try {
@@ -442,65 +442,153 @@ jobs:
 
       - name: Restore and build project
         run: |
-          # Find all .sln files in the current directory
+          # Find the .sln file in the current directory
           $sln_files = Get-ChildItem -Filter "*.sln" -File
           
           if ($sln_files.Count -eq 0) {
-            Write-Host "✗ No .sln files found in root directory" -ForegroundColor Red
+            Write-Host "✗ No .sln file found in root directory" -ForegroundColor Red
             exit 1
           }
           
-          # Restore and build each .sln file found
-          foreach ($sln_file in $sln_files) {
-            Write-Host "Processing $($sln_file.Name)..."
+          if ($sln_files.Count -gt 1) {
+            Write-Host "⚠ Multiple .sln files found, using the first one: $($sln_files[0].Name)" -ForegroundColor Yellow
+          }
+          
+          $sln_file = $sln_files[0]
+          Write-Host "Building solution: $($sln_file.Name)" -ForegroundColor Cyan
+          
+          $solutionSuccess = $false
+          
+          # Step 1: Try dotnet restore AND dotnet build
+          Write-Host "Attempting dotnet restore and build for $($sln_file.Name)..."
+          
+          dotnet restore $sln_file.Name 2>&1 | Tee-Object -Variable restoreOutput
+          Write-Host $restoreOutput
+          $dotnetRestoreSuccess = ($LASTEXITCODE -eq 0)
+          
+          $dotnetBuildSuccess = $false
+          $hasPartialFailures = $false
+          
+          if ($dotnetRestoreSuccess) {
+            dotnet build $sln_file.Name --configuration ${{ inputs.build_configuration }} --no-restore 2>&1 | Tee-Object -Variable buildOutput
+            Write-Host $buildOutput
+            $dotnetBuildSuccess = ($LASTEXITCODE -eq 0)
             
-            # Step 1: Try dotnet restore AND dotnet build
-            Write-Host "Attempting dotnet restore and build for $($sln_file.Name)..."
+            # Check for partial build failures even if overall exit code is 0
+            $buildOutputString = $buildOutput -join "`n"
+            $failedProjects = @()
+            $succeededProjects = @()
             
-            dotnet restore $sln_file.Name 2>&1 | Tee-Object -Variable restoreOutput
-            Write-Host $restoreOutput
-            $dotnetRestoreSuccess = ($LASTEXITCODE -eq 0)
+            # Look for build failure patterns in output
+            $failurePatterns = @(
+              "Build FAILED",
+              "error CS\d+:",
+              "error MSB\d+:",
+              "\d+ Error\(s\)",
+              "Build failed\."
+            )
             
-            $dotnetBuildSuccess = $false
-            if ($dotnetRestoreSuccess) {
-              dotnet build $sln_file.Name --configuration ${{ inputs.build_configuration }} --no-restore 2>&1 | Tee-Object -Variable buildOutput
-              Write-Host $buildOutput
-              $dotnetBuildSuccess = ($LASTEXITCODE -eq 0)
+            $successPatterns = @(
+              "Build succeeded\.",
+              "0 Error\(s\)"
+            )
+            
+            # Check for project-specific failures
+            if ($buildOutputString -match "(\d+) failed") {
+              $failedCount = $matches[1]
+              if ([int]$failedCount -gt 0) {
+                $hasPartialFailures = $true
+                Write-Host "⚠ Detected $failedCount failed project(s) in solution" -ForegroundColor Yellow
+              }
             }
             
-            # Step 2: If either dotnet restore OR dotnet build failed, try MSBuild approach
-            if ($dotnetRestoreSuccess -and $dotnetBuildSuccess) {
-              Write-Host "✓ Successfully restored and built $($sln_file.Name) with dotnet"
+            # Check for error patterns
+            foreach ($pattern in $failurePatterns) {
+              if ($buildOutputString -match $pattern) {
+                $hasPartialFailures = $true
+                Write-Host "⚠ Detected build errors in output: $pattern" -ForegroundColor Yellow
+                break
+              }
+            }
+            
+            # Look for specific project failure messages
+            $lines = $buildOutput
+            foreach ($line in $lines) {
+              if ($line -match "(.+\.csproj).*(FAILED|failed)") {
+                $failedProject = $matches[1]
+                if ($failedProjects -notcontains $failedProject) {
+                  $failedProjects += $failedProject
+                  $hasPartialFailures = $true
+                }
+              }
+              if ($line -match "(.+\.csproj).*(succeeded|Succeeded)") {
+                $succeededProject = $matches[1]
+                if ($succeededProjects -notcontains $succeededProject) {
+                  $succeededProjects += $succeededProject
+                }
+              }
+            }
+            
+            if ($failedProjects.Count -gt 0) {
+              Write-Host "⚠ Failed projects detected:" -ForegroundColor Yellow
+              foreach ($failed in $failedProjects) {
+                Write-Host "  - $failed" -ForegroundColor Red
+              }
+              $hasPartialFailures = $true
+            }
+            
+            if ($hasPartialFailures) {
+              Write-Host "⚠ Partial build failures detected despite exit code 0" -ForegroundColor Yellow
+              $dotnetBuildSuccess = $false
+            }
+          }
+          
+          # Step 2: If dotnet restore failed, dotnet build failed, OR partial failures detected, try MSBuild approach
+          if ($dotnetRestoreSuccess -and $dotnetBuildSuccess -and -not $hasPartialFailures) {
+            Write-Host "✓ Successfully restored and built $($sln_file.Name) with dotnet (all projects succeeded)" -ForegroundColor Green
+            $solutionSuccess = $true
+          } else {
+            if ($hasPartialFailures) {
+              Write-Host "✗ dotnet build had partial failures for $($sln_file.Name), trying MSBuild approach..." -ForegroundColor Yellow
             } else {
               Write-Host "✗ dotnet approach failed for $($sln_file.Name), trying MSBuild approach..." -ForegroundColor Yellow
-              
-              if (-not $dotnetRestoreSuccess) {
-                Write-Host "dotnet restore errors:" -ForegroundColor Red
-                Write-Host $restoreOutput -ForegroundColor Red
-              }
-              if (-not $dotnetBuildSuccess -and $dotnetRestoreSuccess) {
-                Write-Host "dotnet build errors:" -ForegroundColor Red
-                Write-Host $buildOutput -ForegroundColor Red
-              }
-              
-              # Try NuGet restore and MSBuild
-              Write-Host "Restoring packages with NuGet..."
-              nuget restore $sln_file.Name 2>&1 | Tee-Object -Variable nugetOutput
-              Write-Host $nugetOutput
-              
-              Write-Host "Building with MSBuild..."
-              msbuild $sln_file.Name /p:Configuration=${{ inputs.build_configuration }} /p:Platform="Any CPU" /m 2>&1 | Tee-Object -Variable msbuildOutput
-              Write-Host $msbuildOutput
-              
-              if ($LASTEXITCODE -eq 0) {
-                Write-Host "✓ Successfully restored and built $($sln_file.Name) with MSBuild"
-              } else {
-                Write-Host "✗ Both dotnet and MSBuild approaches failed for $($sln_file.Name)" -ForegroundColor Red
-                Write-Host "MSBuild errors:" -ForegroundColor Red
-                Write-Host $msbuildOutput -ForegroundColor Red
-                exit 1
-              }
             }
+            
+            if (-not $dotnetRestoreSuccess) {
+              Write-Host "dotnet restore errors:" -ForegroundColor Red
+              Write-Host $restoreOutput -ForegroundColor Red
+            }
+            if ((-not $dotnetBuildSuccess -and $dotnetRestoreSuccess) -or $hasPartialFailures) {
+              Write-Host "dotnet build errors/warnings:" -ForegroundColor Red
+              Write-Host $buildOutput -ForegroundColor Red
+            }
+            
+            # Try NuGet restore and MSBuild
+            Write-Host "Restoring packages with NuGet..."
+            nuget restore $sln_file.Name 2>&1 | Tee-Object -Variable nugetOutput
+            Write-Host $nugetOutput
+            
+            Write-Host "Building with MSBuild..."
+            msbuild $sln_file.Name /p:Configuration=${{ inputs.build_configuration }} /p:Platform="Any CPU" /m 2>&1 | Tee-Object -Variable msbuildOutput
+            Write-Host $msbuildOutput
+            
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✓ Successfully restored and built $($sln_file.Name) with MSBuild" -ForegroundColor Green
+              $solutionSuccess = $true
+            } else {
+              Write-Host "✗ Both dotnet and MSBuild approaches failed for $($sln_file.Name)" -ForegroundColor Red
+              Write-Host "MSBuild errors:" -ForegroundColor Red
+              Write-Host $msbuildOutput -ForegroundColor Red
+              $solutionSuccess = $false
+            }
+          }
+          
+          # Exit with error if build failed
+          if (-not $solutionSuccess) {
+            Write-Host "✗ Build FAILED for $($sln_file.Name)" -ForegroundColor Red
+            exit 1
+          } else {
+            Write-Host "✓ Build SUCCEEDED for $($sln_file.Name)" -ForegroundColor Green
           }
         shell: pwsh
 
