@@ -68,15 +68,19 @@ jobs:
               break
             }
             if ($inConfigSection -and $line -match "^\s*([^=]+)\s*=") {
-              $config = $matches[1].Trim()
-              if ($configs -notcontains $config) {
-                $configs += $config
-                Write-Host "Found build configuration: $config"
-                
-                # Check if it's a Release configuration (starts with "Release")
-                if ($config -match "^Release") {
-                  $releaseConfigs += $config
-                  Write-Host "  → Identified as Release configuration"
+              $fullConfig = $matches[1].Trim()
+              # Extract only the configuration name (before the pipe)
+              if ($fullConfig -match "^([^|]+)") {
+                $config = $matches[1].Trim()
+                if ($configs -notcontains $config) {
+                  $configs += $config
+                  Write-Host "Found build configuration: $config"
+                  
+                  # Check if it's a Release configuration (starts with "Release")
+                  if ($config -match "^Release") {
+                    $releaseConfigs += $config
+                    Write-Host "  → Identified as Release configuration"
+                  }
                 }
               }
             }
