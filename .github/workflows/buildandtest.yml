@@ -27,11 +27,12 @@ on:
         required: true
 
 jobs:
-  resolve-dependencies:
-    runs-on: ubuntu-latest
+  resolve-and-build-dependencies:
+    runs-on: windows-latest
     outputs:
-      dependencies: ${{ steps.parse-deps.outputs.dependencies }}
-      artifacts-downloaded: ${{ steps.download-deps.outputs.artifacts-downloaded }}
+      dependencies-built: ${{ steps.build-summary.outputs.dependencies-built }}
+    env:
+      BHoMFolder: "C:\\ProgramData\\BHoM"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -39,83 +40,16 @@ jobs:
       - name: Parse dependencies
         id: parse-deps
         run: |
-          if [ -f "dependencies.txt" ]; then
+          if (Test-Path "dependencies.txt") {
             # Convert dependencies.txt to JSON array
-            deps=$(cat dependencies.txt | jq -R -s -c 'split("\n") | map(select(length > 0))')
-            echo "dependencies=$deps" >> $GITHUB_OUTPUT
-            echo "Found dependencies: $deps"
-          else
-            echo "dependencies=[]" >> $GITHUB_OUTPUT
-            echo "No dependencies.txt found"
-          fi
-
-      - name: Download dependency artifacts
-        id: download-deps
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          dependencies='${{ steps.parse-deps.outputs.dependencies }}'
-          branch_name='${{ inputs.branch_name }}'
-          downloaded_artifacts=""
-          
-          if [ "$dependencies" != "[]" ]; then
-            echo "Resolving dependencies for branch: $branch_name"
-            
-            for dep in $(echo "$dependencies" | jq -r '.[]'); do
-              echo "Processing dependency: $dep"
-              
-              # Try to find artifact for current branch first, then develop
-              for target_branch in "$branch_name" "develop"; do
-                echo "Checking for artifacts on branch: $target_branch"
-                
-                # Get latest workflow run for the target branch
-                run_id=$(gh api \
-                  -H "Accept: application/vnd.github+json" \
-                  "/repos/$dep/actions/runs" \
-                  --jq ".workflow_runs[] | select(.head_branch == \"$target_branch\" and .conclusion == \"success\") | .id" \
-                  | head -1)
-                
-                if [ -n "$run_id" ]; then
-                  echo "Found successful run: $run_id for $dep on $target_branch"
-                  
-                  # Download artifacts from this run
-                  artifact_name="build-outputs-$target_branch"
-                  
-                  # Check if artifact exists and download
-                  if gh api "/repos/$dep/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == \"$artifact_name\") | .id" | head -1 > /dev/null; then
-                    echo "Downloading artifact: $artifact_name from $dep"
-                    gh api "/repos/$dep/actions/runs/$run_id/artifacts" \
-                      --jq ".artifacts[] | select(.name == \"$artifact_name\") | .archive_download_url" \
-                      | head -1 \
-                      | xargs -I {} gh api {} > "${dep//\//_}_artifact.zip"
-                    
-                    # Extract to dependency-specific folder
-                    mkdir -p "dependencies/${dep//\//_}"
-                    unzip -q "${dep//\//_}_artifact.zip" -d "dependencies/${dep//\//_}/"
-                    
-                    downloaded_artifacts="$downloaded_artifacts,$dep"
-                    echo "Successfully downloaded artifact for $dep from $target_branch"
-                    break
-                  fi
-                fi
-              done
-              
-              if [[ "$downloaded_artifacts" != *"$dep"* ]]; then
-                echo "No suitable artifact found for $dep - will need to build"
-              fi
-            done
-          fi
-          
-          echo "artifacts-downloaded=${downloaded_artifacts#,}" >> $GITHUB_OUTPUT
-
-  build:
-    runs-on: windows-latest
-    needs: resolve-dependencies
-    env:
-      BHoMFolder: "C:\\ProgramData\\BHoM"
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+            $deps = Get-Content "dependencies.txt" | Where-Object { $_.Trim() -ne "" -and !$_.StartsWith("#") } | ConvertTo-Json -Compress
+            echo "dependencies=$deps" >> $env:GITHUB_OUTPUT
+            Write-Host "Found dependencies: $deps"
+          } else {
+            echo "dependencies=[]" >> $env:GITHUB_OUTPUT
+            Write-Host "No dependencies.txt found"
+          }
+        shell: pwsh
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -137,32 +71,80 @@ jobs:
           Write-Host "  - Assemblies folder: $assembliesPath"
         shell: pwsh
 
-      - name: Restore dependencies artifacts
-        if: needs.resolve-dependencies.outputs.artifacts-downloaded != ''
+      - name: Download dependency artifacts
+        id: download-deps
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          if (Test-Path "dependencies") {
-            Write-Host "Restoring dependency artifacts to $env:BHoMFolder..."
+          $dependencies = '${{ steps.parse-deps.outputs.dependencies }}' | ConvertFrom-Json
+          $branch_name = '${{ inputs.branch_name }}'
+          $downloaded_artifacts = @()
+          
+          if ($dependencies.Count -gt 0) {
+            Write-Host "Resolving dependencies for branch: $branch_name"
             
-            # Copy each dependency's artifacts directly to BHoM folder
-            Get-ChildItem "dependencies" -Directory | ForEach-Object {
-              $depName = $_.Name
-              Write-Host "Restoring dependency: $depName"
+            foreach ($dep in $dependencies) {
+              Write-Host "Processing dependency: $dep"
               
-              # Copy all files from artifact to BHoM folder
-              if (Test-Path "$($_.FullName)") {
-                Copy-Item "$($_.FullName)/*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
+              # Try to find artifact for current branch first, then develop
+              $found = $false
+              foreach ($target_branch in @($branch_name, "develop")) {
+                if ($found) { break }
+                Write-Host "Checking for artifacts on branch: $target_branch"
+                
+                # Get latest workflow run for the target branch
+                $runs = gh api -H "Accept: application/vnd.github+json" "/repos/$dep/actions/runs" --jq ".workflow_runs[] | select(.head_branch == \`"$target_branch\`" and .conclusion == \`"success\`") | .id" | ConvertFrom-Json -ErrorAction SilentlyContinue
+                
+                if ($runs -and $runs.Count -gt 0) {
+                  $run_id = $runs[0]
+                  Write-Host "Found successful run: $run_id for $dep on $target_branch"
+                  
+                  # Download artifacts from this run
+                  $artifact_name = "build-outputs-$target_branch"
+                  
+                  # Check if artifact exists and download
+                  $artifacts = gh api "/repos/$dep/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == \`"$artifact_name\`")" | ConvertFrom-Json -ErrorAction SilentlyContinue
+                  
+                  if ($artifacts) {
+                    Write-Host "Downloading artifact: $artifact_name from $dep"
+                    $download_url = $artifacts.archive_download_url
+                    $dep_safe = $dep.Replace('/', '_')
+                    
+                    # Download and extract artifact
+                    gh api $download_url > "${dep_safe}_artifact.zip"
+                    
+                    # Extract to dependency-specific folder
+                    New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
+                    Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
+                    
+                    # Copy to BHoM folder
+                    if (Test-Path "dependencies\$dep_safe") {
+                      Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                    
+                    $downloaded_artifacts += $dep
+                    Write-Host "Successfully downloaded and restored artifact for $dep from $target_branch"
+                    $found = $true
+                  }
+                }
+              }
+              
+              if (-not $found) {
+                Write-Host "No suitable artifact found for $dep - will need to build"
               }
             }
-            
-            Write-Host "Dependency artifacts restored to $env:BHoMFolder"
           }
+          
+          $downloaded_string = $downloaded_artifacts -join ","
+          echo "artifacts-downloaded=$downloaded_string" >> $env:GITHUB_OUTPUT
+        shell: pwsh
 
       - name: Clone missing dependencies
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          $dependencies = '${{ needs.resolve-dependencies.outputs.dependencies }}' | ConvertFrom-Json
-          $downloaded = '${{ needs.resolve-dependencies.outputs.artifacts-downloaded }}' -split ','
+          $dependencies = '${{ steps.parse-deps.outputs.dependencies }}' | ConvertFrom-Json
+          $downloaded = '${{ steps.download-deps.outputs.artifacts-downloaded }}' -split ',' | Where-Object { $_ -ne "" }
           
           # Create repositories directory
           New-Item -ItemType Directory -Force -Path "Repositories"
@@ -180,13 +162,13 @@ jobs:
               
               try {
                 git clone $repo_url "Repositories\$repo_name"
-              
-              # Try to checkout matching branch, fallback to develop
+                
+                # Try to checkout matching branch, fallback to develop
                 Push-Location "Repositories\$repo_name"
-              git checkout "${{ inputs.branch_name }}" 2>$null
-              if ($LASTEXITCODE -ne 0) {
-                git checkout "develop"
-              }
+                git checkout "${{ inputs.branch_name }}" 2>$null
+                if ($LASTEXITCODE -ne 0) {
+                  git checkout "develop"
+                }
                 Pop-Location
                 
                 Write-Host "Successfully cloned $repo_name"
@@ -315,7 +297,7 @@ jobs:
               $result = Get-BuildOrder -repo $repo
               if (-not $result) {
                 $sortSuccess = $false
-                break
+                    break
               }
             }
           }
@@ -355,15 +337,15 @@ jobs:
           # Compile each repository in the correct order
           foreach ($repo_name in $buildOrder) {
             Write-Host "Compiling repository: $repo_name"
-              
-              # Take snapshot of BHoM folder before build
-              $preFiles = @{}
+            
+            # Take snapshot of BHoM folder before build
+            $preFiles = @{}
             if (Test-Path "$env:BHoMFolder") {
               Get-ChildItem "$env:BHoMFolder" -Recurse -File | ForEach-Object {
-                  $preFiles[$_.FullName] = $_.LastWriteTime
-                }
+                $preFiles[$_.FullName] = $_.LastWriteTime
               }
-              
+            }
+            
             Push-Location "Repositories\$repo_name"
             
             try {
@@ -388,7 +370,7 @@ jobs:
                   Write-Host $buildOutput -ForegroundColor Red
                   
                   # Restore packages with MSBuild/NuGet
-                  Write-Host "Restoring packages with MSBuild..."
+                  Write-Host "Restoring packages with NuGet..."
                   nuget restore $_.Name
                   
                   # Try with MSBuild as fallback
@@ -427,6 +409,74 @@ jobs:
             }
           }
         shell: pwsh
+
+      - name: Upload dependencies artifact
+        id: build-summary
+        run: |
+          # Create dependencies artifact from BHoM folder
+          if (Test-Path "$env:BHoMFolder") {
+            Write-Host "Packaging dependencies from BHoM folder..."
+            
+            # Count files in BHoM folder
+            $files = Get-ChildItem "$env:BHoMFolder" -Recurse -File -ErrorAction SilentlyContinue
+            Write-Host "Found $($files.Count) files in BHoM folder to package as dependencies"
+            
+            if ($files.Count -gt 0) {
+              echo "dependencies-built=true" >> $env:GITHUB_OUTPUT
+            } else {
+              echo "dependencies-built=false" >> $env:GITHUB_OUTPUT
+              Write-Host "No files found in BHoM folder"
+            }
+          } else {
+            echo "dependencies-built=false" >> $env:GITHUB_OUTPUT
+            Write-Host "BHoM folder does not exist"
+          }
+        shell: pwsh
+
+      - name: Upload dependencies artifact
+        if: steps.build-summary.outputs.dependencies-built == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dependencies
+          path: ${{ env.BHoMFolder }}
+          retention-days: 3
+          compression-level: 6
+
+  build:
+    runs-on: windows-latest
+    needs: resolve-and-build-dependencies
+    env:
+      BHoMFolder: "C:\\ProgramData\\BHoM"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      
+      - name: Setup NuGet.exe for use with actions
+        uses: NuGet/setup-nuget@v2.0.1
+
+      - name: Create BHoM folder
+        run: |
+          Write-Host "Creating BHoM folder at: $env:BHoMFolder"
+          New-Item -ItemType Directory -Force -Path "$env:BHoMFolder"
+          
+          Write-Host "Creating Assemblies subfolder..."
+          $assembliesPath = Join-Path "$env:BHoMFolder" "Assemblies"
+          New-Item -ItemType Directory -Force -Path $assembliesPath
+          
+          Write-Host "✓ BHoM folder and Assemblies subfolder created/verified"
+          Write-Host "  - Main folder: $env:BHoMFolder"
+          Write-Host "  - Assemblies folder: $assembliesPath"
+        shell: pwsh
+
+      - name: Download dependencies
+        if: needs.resolve-and-build-dependencies.outputs.dependencies-built == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: Dependencies
+          path: ${{ env.BHoMFolder }}
 
       - name: Take pre-build snapshot
         run: |
