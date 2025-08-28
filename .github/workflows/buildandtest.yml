@@ -131,13 +131,10 @@ jobs:
         id: parse-deps
         run: |
           if (Test-Path "dependencies.txt") {
-            # Convert dependencies.txt to JSON array
-            $deps = Get-Content "dependencies.txt" | Where-Object { $_.Trim() -ne "" -and !$_.StartsWith("#") } | ConvertTo-Json -Compress
+            $deps = Get-Content "dependencies.txt" | Where-Object { $_.Trim() -and !$_.StartsWith("#") } | ConvertTo-Json -Compress
             echo "dependencies=$deps" >> $env:GITHUB_OUTPUT
-            Write-Host "Found dependencies: $deps"
           } else {
             echo "dependencies=[]" >> $env:GITHUB_OUTPUT
-            Write-Host "No dependencies.txt found"
           }
         shell: pwsh
 
@@ -148,17 +145,7 @@ jobs:
         uses: NuGet/setup-nuget@v2.0.1
 
       - name: Create BHoM folder
-        run: |
-          Write-Host "Creating BHoM folder at: $env:BHoMFolder"
-          New-Item -ItemType Directory -Force -Path "$env:BHoMFolder"
-          
-          Write-Host "Creating Assemblies subfolder..."
-          $assembliesPath = Join-Path "$env:BHoMFolder" "Assemblies"
-          New-Item -ItemType Directory -Force -Path $assembliesPath
-          
-          Write-Host "✓ BHoM folder and Assemblies subfolder created/verified"
-          Write-Host "  - Main folder: $env:BHoMFolder"
-          Write-Host "  - Assemblies folder: $assembliesPath"
+        run: New-Item -ItemType Directory -Force -Path "$env:BHoMFolder\Assemblies" | Out-Null
         shell: pwsh
 
       - name: Check GitHub App secrets
@@ -209,15 +196,15 @@ jobs:
                 if ($found) { break }
                 Write-Host "Checking for artifacts on branch: $target_branch"
                 
-                # Get latest successful workflow run
-                $runs = gh api "/repos/$dep/actions/runs?branch=$target_branch&status=success&per_page=5" --jq ".workflow_runs[].id" 2>$null
+                # Get latest successful workflow run for the target branch
+                $runs = gh api "/repos/$dep/actions/runs?status=success&per_page=10" --jq ".workflow_runs[] | select(.head_branch == `"$target_branch`") | .id" 2>$null
                 if ($LASTEXITCODE -ne 0) {
                   Write-Host "No access to $dep on $target_branch"
                   continue
                 }
                 
                 $runsList = $runs | ConvertFrom-Json -ErrorAction SilentlyContinue
-                if (-not $runsList -or $runsList.Count -eq 0) {
+                if (-not $runsList) {
                   Write-Host "No successful runs found for $dep on $target_branch"
                   continue
                 }
@@ -609,17 +596,7 @@ jobs:
         uses: NuGet/setup-nuget@v2.0.1
 
       - name: Create BHoM folder
-        run: |
-          Write-Host "Creating BHoM folder at: $env:BHoMFolder"
-          New-Item -ItemType Directory -Force -Path "$env:BHoMFolder"
-          
-          Write-Host "Creating Assemblies subfolder..."
-          $assembliesPath = Join-Path "$env:BHoMFolder" "Assemblies"
-          New-Item -ItemType Directory -Force -Path $assembliesPath
-          
-          Write-Host "✓ BHoM folder and Assemblies subfolder created/verified"
-          Write-Host "  - Main folder: $env:BHoMFolder"
-          Write-Host "  - Assemblies folder: $assembliesPath"
+        run: New-Item -ItemType Directory -Force -Path "$env:BHoMFolder\Assemblies" | Out-Null
         shell: pwsh
 
       - name: Download dependencies
