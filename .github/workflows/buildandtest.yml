@@ -164,14 +164,27 @@ jobs:
           Write-Host "  - Assemblies folder: $assembliesPath"
         shell: pwsh
 
+      - name: Check GitHub App Secrets
+        id: check-app-secrets
+        run: |
+          $hasAppSecrets = $false
+          if ('${{ secrets.APP_ID }}' -ne '' -and '${{ secrets.APP_PRIVATE_KEY }}' -ne '' -and '${{ secrets.APP_INSTALLATION_ID }}' -ne '') {
+            $hasAppSecrets = $true
+            Write-Host "✓ GitHub App secrets are available"
+          } else {
+            Write-Host "⚠ GitHub App secrets not available - will use provided token or default" -ForegroundColor Yellow
+          }
+          echo "has-app-secrets=$hasAppSecrets" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
       - name: Generate GitHub App Token
         id: generate-token
+        if: steps.check-app-secrets.outputs.has-app-secrets == 'True'
         uses: actions/create-github-app-token@v1
-        continue-on-error: true
         with:
-          app-id: ${{ secrets.APP_ID || '0' }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY || 'dummy' }}
-          installation-id: ${{ secrets.APP_INSTALLATION_ID || '0' }}
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          installation-id: ${{ secrets.APP_INSTALLATION_ID }}
 
       - name: Download dependency artifacts
         id: download-deps
@@ -187,8 +200,10 @@ jobs:
           
           # Determine authentication method
           $authMethod = "Unknown"
+          $hasAppSecrets = '${{ steps.check-app-secrets.outputs.has-app-secrets }}'
           $appTokenResult = '${{ steps.generate-token.outcome }}'
-          if ($appTokenResult -eq 'success' -and '${{ steps.generate-token.outputs.token }}' -ne '') {
+          
+          if ($hasAppSecrets -eq 'True' -and $appTokenResult -eq 'success' -and '${{ steps.generate-token.outputs.token }}' -ne '') {
             $authMethod = "GitHub App"
           } elseif ('${{ secrets.GH_TOKEN }}' -ne '') {
             $authMethod = "Provided Token (PAT)"
@@ -196,10 +211,6 @@ jobs:
             $authMethod = "Default GITHUB_TOKEN"
           }
           Write-Host "Authentication method: $authMethod"
-          
-          if ($appTokenResult -eq 'failure') {
-            Write-Host "⚠ GitHub App token generation failed - falling back to other methods" -ForegroundColor Yellow
-          }
           
           try {
             $currentUser = gh api user --jq ".login" 2>$null
