@@ -472,99 +472,26 @@ jobs:
           $dotnetRestoreSuccess = ($LASTEXITCODE -eq 0)
           
           $dotnetBuildSuccess = $false
-          $hasPartialFailures = $false
           
           if ($dotnetRestoreSuccess) {
             dotnet build $sln_file.Name --configuration ${{ inputs.build_configuration }} --no-restore 2>&1 | Tee-Object -Variable buildOutput
             Write-Host $buildOutput
             $dotnetBuildSuccess = ($LASTEXITCODE -eq 0)
-            
-            # Check for partial build failures even if overall exit code is 0
-            $buildOutputString = $buildOutput -join "`n"
-            $failedProjects = @()
-            $succeededProjects = @()
-            
-            # Look for build failure patterns in output
-            $failurePatterns = @(
-              "Build FAILED",
-              "error CS\d+:",
-              "error MSB\d+:",
-              "\d+ Error\(s\)",
-              "Build failed\."
-            )
-            
-            $successPatterns = @(
-              "Build succeeded\.",
-              "0 Error\(s\)"
-            )
-            
-            # Check for project-specific failures
-            if ($buildOutputString -match "(\d+) failed") {
-              $failedCount = $matches[1]
-              if ([int]$failedCount -gt 0) {
-                $hasPartialFailures = $true
-                Write-Host "⚠ Detected $failedCount failed project(s) in solution" -ForegroundColor Yellow
-              }
-            }
-            
-            # Check for error patterns
-            foreach ($pattern in $failurePatterns) {
-              if ($buildOutputString -match $pattern) {
-                $hasPartialFailures = $true
-                Write-Host "⚠ Detected build errors in output: $pattern" -ForegroundColor Yellow
-                break
-              }
-            }
-            
-            # Look for specific project failure messages
-            $lines = $buildOutput
-            foreach ($line in $lines) {
-              if ($line -match "(.+\.csproj).*(FAILED|failed)") {
-                $failedProject = $matches[1]
-                if ($failedProjects -notcontains $failedProject) {
-                  $failedProjects += $failedProject
-                  $hasPartialFailures = $true
-                }
-              }
-              if ($line -match "(.+\.csproj).*(succeeded|Succeeded)") {
-                $succeededProject = $matches[1]
-                if ($succeededProjects -notcontains $succeededProject) {
-                  $succeededProjects += $succeededProject
-                }
-              }
-            }
-            
-            if ($failedProjects.Count -gt 0) {
-              Write-Host "⚠ Failed projects detected:" -ForegroundColor Yellow
-              foreach ($failed in $failedProjects) {
-                Write-Host "  - $failed" -ForegroundColor Red
-              }
-              $hasPartialFailures = $true
-            }
-            
-            if ($hasPartialFailures) {
-              Write-Host "⚠ Partial build failures detected despite exit code 0" -ForegroundColor Yellow
-              $dotnetBuildSuccess = $false
-            }
           }
           
-          # Step 2: If dotnet restore failed, dotnet build failed, OR partial failures detected, try MSBuild approach
-          if ($dotnetRestoreSuccess -and $dotnetBuildSuccess -and -not $hasPartialFailures) {
-            Write-Host "✓ Successfully restored and built $($sln_file.Name) with dotnet (all projects succeeded)" -ForegroundColor Green
+          # Step 2: If either dotnet restore OR dotnet build failed, try MSBuild approach
+          if ($dotnetRestoreSuccess -and $dotnetBuildSuccess) {
+            Write-Host "✓ Successfully restored and built $($sln_file.Name) with dotnet" -ForegroundColor Green
             $solutionSuccess = $true
           } else {
-            if ($hasPartialFailures) {
-              Write-Host "✗ dotnet build had partial failures for $($sln_file.Name), trying MSBuild approach..." -ForegroundColor Yellow
-            } else {
-              Write-Host "✗ dotnet approach failed for $($sln_file.Name), trying MSBuild approach..." -ForegroundColor Yellow
-            }
+            Write-Host "✗ dotnet approach failed for $($sln_file.Name), trying MSBuild approach..." -ForegroundColor Yellow
             
             if (-not $dotnetRestoreSuccess) {
               Write-Host "dotnet restore errors:" -ForegroundColor Red
               Write-Host $restoreOutput -ForegroundColor Red
             }
-            if ((-not $dotnetBuildSuccess -and $dotnetRestoreSuccess) -or $hasPartialFailures) {
-              Write-Host "dotnet build errors/warnings:" -ForegroundColor Red
+            if (-not $dotnetBuildSuccess -and $dotnetRestoreSuccess) {
+              Write-Host "dotnet build errors:" -ForegroundColor Red
               Write-Host $buildOutput -ForegroundColor Red
             }
             
