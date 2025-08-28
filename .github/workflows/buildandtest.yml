@@ -164,22 +164,19 @@ jobs:
           Write-Host "  - Assemblies folder: $assembliesPath"
         shell: pwsh
 
-      - name: Check GitHub App Secrets
+      - name: Check GitHub App secrets
         id: check-app-secrets
         run: |
-          $hasAppSecrets = $false
-          if ('${{ secrets.APP_ID }}' -ne '' -and '${{ secrets.APP_PRIVATE_KEY }}' -ne '' -and '${{ secrets.APP_INSTALLATION_ID }}' -ne '') {
-            $hasAppSecrets = $true
-            Write-Host "✓ GitHub App secrets are available"
-          } else {
-            Write-Host "⚠ GitHub App secrets not available - will use provided token or default" -ForegroundColor Yellow
-          }
-          echo "has-app-secrets=$hasAppSecrets" >> $env:GITHUB_OUTPUT
-        shell: pwsh
+          if [ -n "${{ secrets.APP_ID }}" ] && [ -n "${{ secrets.APP_PRIVATE_KEY }}" ] && [ -n "${{ secrets.APP_INSTALLATION_ID }}" ]; then
+            echo "app-secrets-available=true" >> $GITHUB_OUTPUT
+          else
+            echo "app-secrets-available=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
 
       - name: Generate GitHub App Token
         id: generate-token
-        if: steps.check-app-secrets.outputs.has-app-secrets == 'True'
+        if: steps.check-app-secrets.outputs.app-secrets-available == 'true'
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.APP_ID }}
@@ -195,137 +192,73 @@ jobs:
           $branch_name = '${{ inputs.branch_name }}'
           $downloaded_artifacts = @()
           
-          # Debug: Test token permissions
-          Write-Host "Testing GitHub token permissions..."
-          
           # Determine authentication method
-          $authMethod = "Unknown"
-          $hasAppSecrets = '${{ steps.check-app-secrets.outputs.has-app-secrets }}'
-          $appTokenResult = '${{ steps.generate-token.outcome }}'
-          
-          if ($hasAppSecrets -eq 'True' -and $appTokenResult -eq 'success' -and '${{ steps.generate-token.outputs.token }}' -ne '') {
-            $authMethod = "GitHub App"
+          if ('${{ steps.generate-token.outputs.token }}' -ne '') {
+            Write-Host "Using GitHub App authentication"
           } elseif ('${{ secrets.GH_TOKEN }}' -ne '') {
-            $authMethod = "Provided Token (PAT)"
+            Write-Host "Using provided token"
           } else {
-            $authMethod = "Default GITHUB_TOKEN"
+            Write-Host "Using default GITHUB_TOKEN"
           }
-          Write-Host "Authentication method: $authMethod"
           
-          try {
-            $currentUser = gh api user --jq ".login" 2>$null
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "✓ Token is valid, authenticated as: $currentUser"
-              
-              # Test organization access
-              try {
-                $orgAccess = gh api "/user/memberships/orgs" --jq ".[].organization.login" 2>$null
-                if ($LASTEXITCODE -eq 0) {
-                  Write-Host "✓ Organization access available: $orgAccess"
-                } else {
-                  Write-Host "⚠ Limited organization access (may only work with public repos)" -ForegroundColor Yellow
-                }
-              } catch {
-                Write-Host "⚠ Could not check organization access (may only work with public repos)" -ForegroundColor Yellow
-              }
-            } else {
-              Write-Host "✗ Token authentication failed" -ForegroundColor Red
-              Write-Host "⚠ Will attempt to access public repositories only" -ForegroundColor Yellow
-            }
-          } catch {
-            Write-Host "✗ Token test failed: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host "⚠ Will attempt to access public repositories only" -ForegroundColor Yellow
-          }
+          Write-Host "Resolving dependencies for branch: $branch_name"
           
           if ($dependencies.Count -gt 0) {
-            Write-Host "Resolving dependencies for branch: $branch_name"
-            
             foreach ($dep in $dependencies) {
               Write-Host "Processing dependency: $dep"
               
-              # Try to find artifact for current branch first, then develop
               $found = $false
               foreach ($target_branch in @($branch_name, "develop")) {
                 if ($found) { break }
                 Write-Host "Checking for artifacts on branch: $target_branch"
                 
-                # Get latest workflow run for the target branch
-                try {
-                  $runsOutput = gh api -H "Accept: application/vnd.github+json" "/repos/$dep/actions/runs" --jq ".workflow_runs[] | select(.head_branch == `"$target_branch`" and .conclusion == `"success`") | .id" 2>$null
-                  if ($LASTEXITCODE -eq 0 -and $runsOutput) {
-                    $runs = $runsOutput | ConvertFrom-Json -ErrorAction SilentlyContinue
-                    if ($runs -is [System.Object[]] -and $runs.Count -gt 0) {
-                      # Multiple runs found
-                      $run_id = $runs[0]
-                    } elseif ($runs -and $runs -ne "") {
-                      # Single run found
-                      $run_id = $runs
-                    } else {
-                      $run_id = $null
-                    }
-                  } else {
-                    Write-Host "No access to workflow runs for $dep (may be private repository or no permissions)" -ForegroundColor Yellow
-                    $run_id = $null
-                  }
-                } catch {
-                  Write-Host "Failed to access workflow runs for $dep`: $($_.Exception.Message)" -ForegroundColor Yellow
-                  $run_id = $null
+                # Get latest successful workflow run
+                $runs = gh api "/repos/$dep/actions/runs?branch=$target_branch&status=success&per_page=5" --jq ".workflow_runs[].id" 2>$null
+                if ($LASTEXITCODE -ne 0) {
+                  Write-Host "No access to $dep on $target_branch"
+                  continue
                 }
                 
-                if ($run_id) {
-                  Write-Host "Found successful run: $run_id for $dep on $target_branch"
+                $runsList = $runs | ConvertFrom-Json -ErrorAction SilentlyContinue
+                if (-not $runsList -or $runsList.Count -eq 0) {
+                  Write-Host "No successful runs found for $dep on $target_branch"
+                  continue
+                }
+                
+                $run_id = if ($runsList -is [array]) { $runsList[0] } else { $runsList }
+                
+                Write-Host "Found successful run: $run_id for $dep on $target_branch"
+                
+                # Get Release configurations to try
+                $releaseConfigs = '${{ needs.discover-configurations.outputs.release-configurations }}' | ConvertFrom-Json
+                if ($releaseConfigs.Count -eq 0) { $releaseConfigs = @("Release") }
+                
+                foreach ($releaseConfig in $releaseConfigs) {
+                  $artifact_name = "build-outputs-$target_branch-$releaseConfig"
+                  Write-Host "Looking for artifact: $artifact_name"
                   
-                                    # Try to find Release configuration artifacts
-                  $releaseConfigs = '${{ needs.discover-configurations.outputs.release-configurations }}' | ConvertFrom-Json
+                  $artifacts = gh api "/repos/$dep/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == `"$artifact_name`")" 2>$null
+                  if ($LASTEXITCODE -ne 0) { continue }
                   
-                  # If no release configs found, fallback to just "Release"
-                  if ($releaseConfigs.Count -eq 0) {
-                    Write-Host "No Release configurations discovered, falling back to 'Release'"
-                    $releaseConfigs = @("Release")
-                  }
-                  
-                  $artifactFound = $false
-                  
-                  foreach ($releaseConfig in $releaseConfigs) {
-                    if ($artifactFound) { break }
-                    $artifact_name = "build-outputs-$target_branch-$releaseConfig"
-                    Write-Host "Looking for artifact: $artifact_name"
-                  
-                    # Check if artifact exists and download
-                    try {
-                      $artifactsOutput = gh api "/repos/$dep/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == `"$artifact_name`")" 2>$null
-                      if ($LASTEXITCODE -eq 0 -and $artifactsOutput) {
-                        $artifacts = $artifactsOutput | ConvertFrom-Json -ErrorAction SilentlyContinue
-                      } else {
-                        $artifacts = $null
-                      }
-                    } catch {
-                      Write-Host "Failed to access artifacts for $dep run $run_id`: $($_.Exception.Message)" -ForegroundColor Yellow
-                      $artifacts = $null
+                  $artifactData = $artifacts | ConvertFrom-Json -ErrorAction SilentlyContinue
+                  if ($artifactData) {
+                    Write-Host "Downloading artifact: $artifact_name from $dep"
+                    $dep_safe = $dep.Replace('/', '_')
+                    
+                    # Download and extract
+                    gh api $artifactData.archive_download_url > "${dep_safe}_artifact.zip"
+                    New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
+                    Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
+                    
+                    # Copy to BHoM folder
+                    if (Test-Path "dependencies\$dep_safe") {
+                      Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
                     }
                     
-                    if ($artifacts) {
-                      Write-Host "Downloading artifact: $artifact_name from $dep"
-                      $download_url = $artifacts.archive_download_url
-                      $dep_safe = $dep.Replace('/', '_')
-                      
-                      # Download and extract artifact
-                      gh api $download_url > "${dep_safe}_artifact.zip"
-                      
-                      # Extract to dependency-specific folder
-                      New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
-                      Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
-                      
-                      # Copy to BHoM folder
-                      if (Test-Path "dependencies\$dep_safe") {
-                        Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
-                      }
-                      
-                      $downloaded_artifacts += $dep
-                      Write-Host "Successfully downloaded and restored artifact for $dep from $target_branch using $releaseConfig"
-                      $found = $true
-                      $artifactFound = $true
-                    }
+                    $downloaded_artifacts += $dep
+                    Write-Host "✓ Successfully downloaded artifact for $dep"
+                    $found = $true
+                    break
                   }
                 }
               }
@@ -336,8 +269,10 @@ jobs:
             }
           }
           
+          # Output results
           $downloaded_string = $downloaded_artifacts -join ","
           echo "artifacts-downloaded=$downloaded_string" >> $env:GITHUB_OUTPUT
+          Write-Host "✓ Artifact resolution completed. Downloaded: $($downloaded_artifacts.Count) dependencies"
         shell: pwsh
 
       - name: Clone missing dependencies
