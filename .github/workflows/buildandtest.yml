@@ -93,7 +93,7 @@ jobs:
                 Write-Host "Checking for artifacts on branch: $target_branch"
                 
                 # Get latest workflow run for the target branch
-                $runs = gh api -H "Accept: application/vnd.github+json" "/repos/$dep/actions/runs" --jq ".workflow_runs[] | select(.head_branch == \`"$target_branch\`" and .conclusion == \`"success\`") | .id" | ConvertFrom-Json -ErrorAction SilentlyContinue
+                $runs = gh api -H "Accept: application/vnd.github+json" "/repos/$dep/actions/runs" --jq ".workflow_runs[] | select(.head_branch == `"$target_branch`" and .conclusion == `"success`") | .id" | ConvertFrom-Json -ErrorAction SilentlyContinue
                 
                 if ($runs -and $runs.Count -gt 0) {
                   $run_id = $runs[0]
@@ -103,7 +103,7 @@ jobs:
                   $artifact_name = "build-outputs-$target_branch"
                   
                   # Check if artifact exists and download
-                  $artifacts = gh api "/repos/$dep/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == \`"$artifact_name\`")" | ConvertFrom-Json -ErrorAction SilentlyContinue
+                  $artifacts = gh api "/repos/$dep/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == `"$artifact_name`")" | ConvertFrom-Json -ErrorAction SilentlyContinue
                   
                   if ($artifacts) {
                     Write-Host "Downloading artifact: $artifact_name from $dep"
@@ -162,13 +162,13 @@ jobs:
               
               try {
                 git clone $repo_url "Repositories\$repo_name"
-                
-                # Try to checkout matching branch, fallback to develop
+              
+              # Try to checkout matching branch, fallback to develop
                 Push-Location "Repositories\$repo_name"
-                git checkout "${{ inputs.branch_name }}" 2>$null
-                if ($LASTEXITCODE -ne 0) {
-                  git checkout "develop"
-                }
+              git checkout "${{ inputs.branch_name }}" 2>$null
+              if ($LASTEXITCODE -ne 0) {
+                git checkout "develop"
+              }
                 Pop-Location
                 
                 Write-Host "Successfully cloned $repo_name"
@@ -337,15 +337,15 @@ jobs:
           # Compile each repository in the correct order
           foreach ($repo_name in $buildOrder) {
             Write-Host "Compiling repository: $repo_name"
-            
-            # Take snapshot of BHoM folder before build
-            $preFiles = @{}
+              
+              # Take snapshot of BHoM folder before build
+              $preFiles = @{}
             if (Test-Path "$env:BHoMFolder") {
               Get-ChildItem "$env:BHoMFolder" -Recurse -File | ForEach-Object {
-                $preFiles[$_.FullName] = $_.LastWriteTime
+                  $preFiles[$_.FullName] = $_.LastWriteTime
+                }
               }
-            }
-            
+              
             Push-Location "Repositories\$repo_name"
             
             try {
