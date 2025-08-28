@@ -164,6 +164,19 @@ jobs:
           $branch_name = '${{ inputs.branch_name }}'
           $downloaded_artifacts = @()
           
+          # Debug: Test token permissions
+          Write-Host "Testing GitHub token permissions..."
+          try {
+            $currentUser = gh api user --jq ".login" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✓ Token is valid, authenticated as: $currentUser"
+            } else {
+              Write-Host "✗ Token authentication failed" -ForegroundColor Red
+            }
+          } catch {
+            Write-Host "✗ Token test failed: $($_.Exception.Message)" -ForegroundColor Red
+          }
+          
           if ($dependencies.Count -gt 0) {
             Write-Host "Resolving dependencies for branch: $branch_name"
             
