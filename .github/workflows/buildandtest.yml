@@ -27,9 +27,6 @@ on:
       APP_PRIVATE_KEY:
         description: 'GitHub App Private Key (alternative to GH_TOKEN)'
         required: false
-      APP_INSTALLATION_ID:
-        description: 'GitHub App Installation ID (alternative to GH_TOKEN)'
-        required: false
 
 jobs:
   discover-configurations:
@@ -167,7 +164,7 @@ jobs:
       - name: Check GitHub App secrets
         id: check-app-secrets
         run: |
-          if [ -n "${{ secrets.APP_ID }}" ] && [ -n "${{ secrets.APP_PRIVATE_KEY }}" ] && [ -n "${{ secrets.APP_INSTALLATION_ID }}" ]; then
+          if [ -n "${{ secrets.APP_ID }}" ] && [ -n "${{ secrets.APP_PRIVATE_KEY }}" ]; then
             echo "app-secrets-available=true" >> $GITHUB_OUTPUT
           else
             echo "app-secrets-available=false" >> $GITHUB_OUTPUT
@@ -179,9 +176,9 @@ jobs:
         if: steps.check-app-secrets.outputs.app-secrets-available == 'true'
         uses: actions/create-github-app-token@v1
         with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          installation-id: ${{ secrets.APP_INSTALLATION_ID }}
+          app_id: ${{ secrets.APP_ID }}
+          private_key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
 
       - name: Download dependency artifacts
         id: download-deps
