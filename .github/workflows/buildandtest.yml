@@ -177,10 +177,29 @@ jobs:
                 Write-Host "Checking for artifacts on branch: $target_branch"
                 
                 # Get latest workflow run for the target branch
-                $runs = gh api -H "Accept: application/vnd.github+json" "/repos/$dep/actions/runs" --jq ".workflow_runs[] | select(.head_branch == `"$target_branch`" and .conclusion == `"success`") | .id" | ConvertFrom-Json -ErrorAction SilentlyContinue
+                try {
+                  $runsOutput = gh api -H "Accept: application/vnd.github+json" "/repos/$dep/actions/runs" --jq ".workflow_runs[] | select(.head_branch == `"$target_branch`" and .conclusion == `"success`") | .id" 2>$null
+                  if ($LASTEXITCODE -eq 0 -and $runsOutput) {
+                    $runs = $runsOutput | ConvertFrom-Json -ErrorAction SilentlyContinue
+                    if ($runs -is [System.Object[]] -and $runs.Count -gt 0) {
+                      # Multiple runs found
+                      $run_id = $runs[0]
+                    } elseif ($runs -and $runs -ne "") {
+                      # Single run found
+                      $run_id = $runs
+                    } else {
+                      $run_id = $null
+                    }
+                  } else {
+                    Write-Host "No access to workflow runs for $dep (may be private repository or no permissions)" -ForegroundColor Yellow
+                    $run_id = $null
+                  }
+                } catch {
+                  Write-Host "Failed to access workflow runs for $dep`: $($_.Exception.Message)" -ForegroundColor Yellow
+                  $run_id = $null
+                }
                 
-                if ($runs -and $runs.Count -gt 0) {
-                  $run_id = $runs[0]
+                if ($run_id) {
                   Write-Host "Found successful run: $run_id for $dep on $target_branch"
                   
                                     # Try to find Release configuration artifacts
@@ -200,7 +219,17 @@ jobs:
                     Write-Host "Looking for artifact: $artifact_name"
                   
                     # Check if artifact exists and download
-                    $artifacts = gh api "/repos/$dep/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == `"$artifact_name`")" | ConvertFrom-Json -ErrorAction SilentlyContinue
+                    try {
+                      $artifactsOutput = gh api "/repos/$dep/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == `"$artifact_name`")" 2>$null
+                      if ($LASTEXITCODE -eq 0 -and $artifactsOutput) {
+                        $artifacts = $artifactsOutput | ConvertFrom-Json -ErrorAction SilentlyContinue
+                      } else {
+                        $artifacts = $null
+                      }
+                    } catch {
+                      Write-Host "Failed to access artifacts for $dep run $run_id`: $($_.Exception.Message)" -ForegroundColor Yellow
+                      $artifacts = $null
+                    }
                     
                     if ($artifacts) {
                       Write-Host "Downloading artifact: $artifact_name from $dep"
