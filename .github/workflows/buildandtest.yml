@@ -127,7 +127,14 @@ jobs:
         run: |
           Write-Host "Creating BHoM folder at: $env:BHoMFolder"
           New-Item -ItemType Directory -Force -Path "$env:BHoMFolder"
-          Write-Host "✓ BHoM folder created/verified"
+          
+          Write-Host "Creating Assemblies subfolder..."
+          $assembliesPath = Join-Path "$env:BHoMFolder" "Assemblies"
+          New-Item -ItemType Directory -Force -Path $assembliesPath
+          
+          Write-Host "✓ BHoM folder and Assemblies subfolder created/verified"
+          Write-Host "  - Main folder: $env:BHoMFolder"
+          Write-Host "  - Assemblies folder: $assembliesPath"
         shell: pwsh
 
       - name: Restore dependencies artifacts
