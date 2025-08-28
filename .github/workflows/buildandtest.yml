@@ -19,8 +19,17 @@ on:
 
     secrets:
       GH_TOKEN:
-        description: 'GitHub token with repo access'
-        required: true
+        description: 'GitHub token for accessing artifacts from other repositories (PAT or GitHub App token). If not provided, will only access public repositories.'
+        required: false
+      APP_ID:
+        description: 'GitHub App ID (alternative to GH_TOKEN)'
+        required: false
+      APP_PRIVATE_KEY:
+        description: 'GitHub App Private Key (alternative to GH_TOKEN)'
+        required: false
+      APP_INSTALLATION_ID:
+        description: 'GitHub App Installation ID (alternative to GH_TOKEN)'
+        required: false
 
 jobs:
   discover-configurations:
@@ -155,10 +164,19 @@ jobs:
           Write-Host "  - Assemblies folder: $assembliesPath"
         shell: pwsh
 
+      - name: Generate GitHub App Token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.APP_ID || '0' }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY || 'dummy' }}
+          installation-id: ${{ secrets.APP_INSTALLATION_ID || '0' }}
+
       - name: Download dependency artifacts
         id: download-deps
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.GH_TOKEN || github.token }}
         run: |
           $dependencies = '${{ steps.parse-deps.outputs.dependencies }}' | ConvertFrom-Json
           $branch_name = '${{ inputs.branch_name }}'
@@ -166,15 +184,46 @@ jobs:
           
           # Debug: Test token permissions
           Write-Host "Testing GitHub token permissions..."
+          
+          # Determine authentication method
+          $authMethod = "Unknown"
+          $appTokenResult = '${{ steps.generate-token.outcome }}'
+          if ($appTokenResult -eq 'success' -and '${{ steps.generate-token.outputs.token }}' -ne '') {
+            $authMethod = "GitHub App"
+          } elseif ('${{ secrets.GH_TOKEN }}' -ne '') {
+            $authMethod = "Provided Token (PAT)"
+          } else {
+            $authMethod = "Default GITHUB_TOKEN"
+          }
+          Write-Host "Authentication method: $authMethod"
+          
+          if ($appTokenResult -eq 'failure') {
+            Write-Host "⚠ GitHub App token generation failed - falling back to other methods" -ForegroundColor Yellow
+          }
+          
           try {
             $currentUser = gh api user --jq ".login" 2>$null
             if ($LASTEXITCODE -eq 0) {
               Write-Host "✓ Token is valid, authenticated as: $currentUser"
+              
+              # Test organization access
+              try {
+                $orgAccess = gh api "/user/memberships/orgs" --jq ".[].organization.login" 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✓ Organization access available: $orgAccess"
+                } else {
+                  Write-Host "⚠ Limited organization access (may only work with public repos)" -ForegroundColor Yellow
+                }
+              } catch {
+                Write-Host "⚠ Could not check organization access (may only work with public repos)" -ForegroundColor Yellow
+              }
             } else {
               Write-Host "✗ Token authentication failed" -ForegroundColor Red
+              Write-Host "⚠ Will attempt to access public repositories only" -ForegroundColor Yellow
             }
           } catch {
             Write-Host "✗ Token test failed: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "⚠ Will attempt to access public repositories only" -ForegroundColor Yellow
           }
           
           if ($dependencies.Count -gt 0) {
