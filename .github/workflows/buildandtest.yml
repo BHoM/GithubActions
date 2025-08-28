@@ -123,12 +123,16 @@ jobs:
       - name: Setup NuGet.exe for use with actions
         uses: NuGet/setup-nuget@v2.0.1
 
+      - name: Create BHoM folder
+        run: |
+          Write-Host "Creating BHoM folder at: $env:BHoMFolder"
+          New-Item -ItemType Directory -Force -Path "$env:BHoMFolder"
+          Write-Host "✓ BHoM folder created/verified"
+        shell: pwsh
+
       - name: Restore dependencies artifacts
         if: needs.resolve-dependencies.outputs.artifacts-downloaded != ''
         run: |
-          # Ensure BHoM folder exists
-          New-Item -ItemType Directory -Force -Path "$env:BHoMFolder"
-          
           if (Test-Path "dependencies") {
             Write-Host "Restoring dependency artifacts to $env:BHoMFolder..."
             
@@ -337,9 +341,6 @@ jobs:
             Get-Content "valid_repos.txt" | Out-File "build_order.txt" -Encoding UTF8
           }
           
-          # Ensure BHoM folder exists
-          New-Item -ItemType Directory -Force -Path "$env:BHoMFolder"
-          
           # Read build order
           $buildOrder = Get-Content "build_order.txt" | ForEach-Object { $_.Trim() } | Where-Object { ![string]::IsNullOrWhiteSpace($_) }
           Write-Host "Building $($buildOrder.Count) repositories in dependency order..."
@@ -422,9 +423,6 @@ jobs:
 
       - name: Take pre-build snapshot
         run: |
-          # Ensure BHoM folder exists
-          New-Item -ItemType Directory -Force -Path "$env:BHoMFolder"
-          
           # Take snapshot of BHoM folder before build
           $preFiles = @{}
           if (Test-Path "$env:BHoMFolder") {
