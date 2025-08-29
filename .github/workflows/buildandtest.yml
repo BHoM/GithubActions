@@ -167,13 +167,59 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
+      - name: Determine dependency branches
+        id: determine-branches
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.GH_TOKEN || github.token }}
+        run: |
+          $dependencies = '${{ steps.parse-deps.outputs.dependencies }}' | ConvertFrom-Json
+          $branch_name = '${{ inputs.branch_name }}'
+          $branchMap = @{}
+          
+          Write-Host "Determining branches for dependencies..."
+          Write-Host "Target branch: $branch_name"
+          
+          foreach ($dep in $dependencies) {
+            Write-Host "Checking branch availability for $dep"
+            
+            # Check if target branch exists in the dependency repo
+            $branchExists = $false
+            try {
+              gh api "/repos/$dep/branches/$branch_name" 2>$null | Out-Null
+              if ($LASTEXITCODE -eq 0) {
+                $branchExists = $true
+                Write-Host "  ✓ Branch '$branch_name' exists"
+              }
+            } catch {
+              # Branch doesn't exist or no access
+            }
+            
+            if ($branchExists) {
+              $branchMap[$dep] = $branch_name
+            } else {
+              $branchMap[$dep] = "develop"
+              Write-Host "  → Falling back to 'develop' branch"
+            }
+          }
+          
+          # Display final branch mapping
+          Write-Host "`nBranch mapping for dependencies:"
+          foreach ($dep in $dependencies) {
+            Write-Host "  $dep → $($branchMap[$dep])"
+          }
+          
+          # Convert to JSON for use in subsequent steps
+          $branchMapJson = $branchMap | ConvertTo-Json -Compress
+          echo "branch-map=$branchMapJson" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
       - name: Download dependency artifacts
         id: download-deps
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.GH_TOKEN || github.token }}
         run: |
           $dependencies = '${{ steps.parse-deps.outputs.dependencies }}' | ConvertFrom-Json
-          $branch_name = '${{ inputs.branch_name }}'
+          $branchMap = '${{ steps.determine-branches.outputs.branch-map }}' | ConvertFrom-Json
           $downloaded_artifacts = @()
           
           # Determine authentication method
@@ -185,65 +231,60 @@ jobs:
             Write-Host "Using default GITHUB_TOKEN"
           }
           
-          Write-Host "Resolving dependencies for branch: $branch_name"
+          Write-Host "Downloading artifacts using pre-determined branches..."
           
           if ($dependencies.Count -gt 0) {
             foreach ($dep in $dependencies) {
-              Write-Host "Processing dependency: $dep"
+              $target_branch = $branchMap.$dep
+              Write-Host "Processing dependency: $dep (branch: $target_branch)"
+              
+              # Get latest successful workflow run for the target branch
+              $runs = gh api "/repos/$dep/actions/runs?status=success&per_page=10" --jq ".workflow_runs[] | select(.head_branch == `"$target_branch`") | .id" 2>$null
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "No access to $dep on $target_branch - will need to build"
+                continue
+              }
+              
+              $runsList = $runs | ConvertFrom-Json -ErrorAction SilentlyContinue
+              if (-not $runsList) {
+                Write-Host "No successful runs found for $dep on $target_branch - will need to build"
+                continue
+              }
+              
+              $run_id = if ($runsList -is [array]) { $runsList[0] } else { $runsList }
+              Write-Host "Found successful run: $run_id for $dep on $target_branch"
+              
+              # Get Release configurations to try
+              $releaseConfigs = '${{ needs.discover-configurations.outputs.release-configurations }}' | ConvertFrom-Json
+              if ($releaseConfigs.Count -eq 0) { $releaseConfigs = @("Release") }
               
               $found = $false
-              foreach ($target_branch in @($branch_name, "develop")) {
+              foreach ($releaseConfig in $releaseConfigs) {
                 if ($found) { break }
-                Write-Host "Checking for artifacts on branch: $target_branch"
+                $artifact_name = "build-outputs-$target_branch-$releaseConfig"
+                Write-Host "Looking for artifact: $artifact_name"
                 
-                # Get latest successful workflow run for the target branch
-                $runs = gh api "/repos/$dep/actions/runs?status=success&per_page=10" --jq ".workflow_runs[] | select(.head_branch == `"$target_branch`") | .id" 2>$null
-                if ($LASTEXITCODE -ne 0) {
-                  Write-Host "No access to $dep on $target_branch"
-                  continue
-                }
+                $artifacts = gh api "/repos/$dep/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == `"$artifact_name`")" 2>$null
+                if ($LASTEXITCODE -ne 0) { continue }
                 
-                $runsList = $runs | ConvertFrom-Json -ErrorAction SilentlyContinue
-                if (-not $runsList) {
-                  Write-Host "No successful runs found for $dep on $target_branch"
-                  continue
-                }
-                
-                $run_id = if ($runsList -is [array]) { $runsList[0] } else { $runsList }
-                
-                Write-Host "Found successful run: $run_id for $dep on $target_branch"
-                
-                # Get Release configurations to try
-                $releaseConfigs = '${{ needs.discover-configurations.outputs.release-configurations }}' | ConvertFrom-Json
-                if ($releaseConfigs.Count -eq 0) { $releaseConfigs = @("Release") }
-                
-                foreach ($releaseConfig in $releaseConfigs) {
-                  $artifact_name = "build-outputs-$target_branch-$releaseConfig"
-                  Write-Host "Looking for artifact: $artifact_name"
+                $artifactData = $artifacts | ConvertFrom-Json -ErrorAction SilentlyContinue
+                if ($artifactData) {
+                  Write-Host "Downloading artifact: $artifact_name from $dep"
+                  $dep_safe = $dep.Replace('/', '_')
                   
-                  $artifacts = gh api "/repos/$dep/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == `"$artifact_name`")" 2>$null
-                  if ($LASTEXITCODE -ne 0) { continue }
+                  # Download and extract
+                  gh api $artifactData.archive_download_url > "${dep_safe}_artifact.zip"
+                  New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
+                  Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
                   
-                  $artifactData = $artifacts | ConvertFrom-Json -ErrorAction SilentlyContinue
-                  if ($artifactData) {
-                    Write-Host "Downloading artifact: $artifact_name from $dep"
-                    $dep_safe = $dep.Replace('/', '_')
-                    
-                    # Download and extract
-                    gh api $artifactData.archive_download_url > "${dep_safe}_artifact.zip"
-                    New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
-                    Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
-                    
-                    # Copy to BHoM folder
-                    if (Test-Path "dependencies\$dep_safe") {
-                      Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
-                    }
-                    
-                    $downloaded_artifacts += $dep
-                    Write-Host "✓ Successfully downloaded artifact for $dep"
-                    $found = $true
-                    break
+                  # Copy to BHoM folder
+                  if (Test-Path "dependencies\$dep_safe") {
+                    Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
                   }
+                  
+                  $downloaded_artifacts += $dep
+                  Write-Host "✓ Successfully downloaded artifact for $dep"
+                  $found = $true
                 }
               }
               
@@ -265,6 +306,7 @@ jobs:
         run: |
           $dependencies = '${{ steps.parse-deps.outputs.dependencies }}' | ConvertFrom-Json
           $downloaded = '${{ steps.download-deps.outputs.artifacts-downloaded }}' -split ',' | Where-Object { $_ -ne "" }
+          $branchMap = '${{ steps.determine-branches.outputs.branch-map }}' | ConvertFrom-Json
           
           # Create repositories directory
           New-Item -ItemType Directory -Force -Path "Repositories"
@@ -272,7 +314,8 @@ jobs:
           # Process only missing dependencies
           foreach ($dep in $dependencies) {
             if ($downloaded -notcontains $dep) {
-              Write-Host "Processing missing dependency: $dep"
+              $target_branch = $branchMap.$dep
+              Write-Host "Processing missing dependency: $dep (branch: $target_branch)"
               
               # Extract repo name from dependency
               $repo_name = $dep.Split('/')[-1]
@@ -282,13 +325,11 @@ jobs:
               
               try {
                 git clone $repo_url "Repositories\$repo_name"
-              
-              # Try to checkout matching branch, fallback to develop
+                
+                # Checkout the pre-determined branch (we know it exists)
                 Push-Location "Repositories\$repo_name"
-              git checkout "${{ inputs.branch_name }}" 2>$null
-              if ($LASTEXITCODE -ne 0) {
-                git checkout "develop"
-              }
+                git checkout "$target_branch"
+                Write-Host "✓ Checked out branch: $target_branch"
                 Pop-Location
                 
                 Write-Host "Successfully cloned $repo_name"
