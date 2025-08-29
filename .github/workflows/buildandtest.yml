@@ -290,13 +290,15 @@ jobs:
                     Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
                   }
                   
-                  $downloaded_artifacts += $dep
                   Write-Host "✓ Successfully downloaded artifact for $dep for configuration $releaseConfig"
                   $found = $true
                 }
               }
               
-              if (-not $found) {
+              if ($found) {
+                $downloaded_artifacts += $dep
+                Write-Host "✓ Completed artifact downloads for $dep"
+              } else {
                 Write-Host "No suitable artifact found for $dep - will need to build"
               }
             }
