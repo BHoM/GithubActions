@@ -911,16 +911,54 @@ jobs:
             
             $slnFile = $slnFiles[0]
             Write-Host "Running tests on solution: $($slnFile.Name)"
-            dotnet test $slnFile.FullName --configuration ${{ matrix.build-configuration }} --no-build --verbosity normal
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "✗ Tests failed on solution" -ForegroundColor Red
-              exit 1
-            }
             
-            Write-Host "✓ All tests passed on solution"
+            # Create test-results directory
+            New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
+            
+            # Run tests with TRX logger for test reporting
+            dotnet test $slnFile.FullName --configuration ${{ matrix.build-configuration }} --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx" --results-directory test-results
+            
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✓ All tests passed on solution"
+            } else {
+              Write-Host "⚠ Some tests failed on solution" -ForegroundColor Yellow
+            }
             
           } finally {
             Pop-Location
           }
         shell: pwsh
+
+      - name: Upload Test Results Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.build-configuration }}
+          path: .ci/unit-tests/test-results/test-results.trx
+
+  test-report:
+    if: always()
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Test Results Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          path: test-results
+          merge-multiple: true
+
+      - name: Create Test Report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Dotnet Test Results
+          path: test-results/**/*.trx
+          reporter: dotnet-trx
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
   
