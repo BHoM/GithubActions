@@ -269,7 +269,6 @@ jobs:
               
               $found = $false
               foreach ($releaseConfig in $releaseConfigs) {
-                if ($found) { break }
                 $artifact_name = "build-outputs-$target_branch-$releaseConfig"
                 Write-Host "Looking for artifact: $artifact_name"
                 
@@ -292,7 +291,7 @@ jobs:
                   }
                   
                   $downloaded_artifacts += $dep
-                  Write-Host "✓ Successfully downloaded artifact for $dep"
+                  Write-Host "✓ Successfully downloaded artifact for $dep for configuration $releaseConfig"
                   $found = $true
                 }
               }
