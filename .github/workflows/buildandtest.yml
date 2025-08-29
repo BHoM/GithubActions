@@ -815,7 +815,112 @@ jobs:
           retention-days: 90
           compression-level: 6
 
+      - name: Setup Test Toolkit
+        run: |
+          Write-Host "Cloning BHoM/Test_Toolkit..."
+          git clone https://github.com/BHoM/Test_Toolkit.git
+          
+          Write-Host "Checking out Test_Toolkit-InvestigateRunningAllChecksThroughNUnit branch..."
+          Push-Location Test_Toolkit
+          git checkout Test_Toolkit-InvestigateRunningAllChecksThroughNUnit
+          
+          Write-Host "Building Test_Toolkit..."
+          # Find solution file in Test_Toolkit
+          $slnFiles = Get-ChildItem -Filter "*.sln" -File
+          if ($slnFiles.Count -gt 0) {
+            $slnFile = $slnFiles[0]
+            Write-Host "Building $($slnFile.Name) with configuration Debug"
+            
+            # Try dotnet build first
+            dotnet build $slnFile.Name --configuration Debug
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "✓ Successfully built Test_Toolkit with dotnet build"
+            } else {
+              Write-Host "⚠ dotnet build failed, trying MSBuild..." -ForegroundColor Yellow
+              msbuild $slnFile.Name /p:Configuration=Debug /p:Platform="Any CPU" /m
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "✓ Successfully built Test_Toolkit with MSBuild"
+              } else {
+                Write-Host "✗ Failed to build Test_Toolkit" -ForegroundColor Red
+                exit 1
+              }
+            }
+          } else {
+            Write-Host "⚠ No solution file found in Test_Toolkit" -ForegroundColor Yellow
+          }
+          
+          Pop-Location
+          Write-Host "✓ Test_Toolkit setup completed"
+        shell: pwsh
+
       - name: Run tests
         run: |
-          dotnet test --configuration ${{ matrix.build-configuration }} --no-build --verbosity normal
+          Write-Host "Changing to test directory: .ci/unit-tests"
+          if (-not (Test-Path ".ci/unit-tests")) {
+            Write-Host "✗ Test directory .ci/unit-tests not found" -ForegroundColor Red
+            exit 1
+          }
+          
+          Push-Location ".ci/unit-tests"
+          
+          try {
+            Write-Host "Building only test projects in configuration ${{ matrix.build-configuration }}..."
+            
+            # Find all .csproj files in the current directory and subdirectories
+            $testProjects = Get-ChildItem -Filter "*.csproj" -File -Recurse
+            
+            if ($testProjects.Count -eq 0) {
+              Write-Host "✗ No test project files found in .ci/unit-tests" -ForegroundColor Red
+              exit 1
+            }
+            
+            Write-Host "Found $($testProjects.Count) test project(s):"
+            foreach ($project in $testProjects) {
+              Write-Host "  - $($project.Name) (in $($project.Directory.Name))"
+            }
+            
+            # Build each test project individually (this will skip already-built referenced projects)
+            $buildSuccess = $true
+            foreach ($project in $testProjects) {
+              Write-Host "Building test project: $($project.Name)..."
+              dotnet build $project.FullName --configuration ${{ matrix.build-configuration }} --verbosity normal --no-dependencies
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "✗ Failed to build test project: $($project.Name)" -ForegroundColor Red
+                $buildSuccess = $false
+                break
+              }
+              Write-Host "✓ Successfully built: $($project.Name)"
+            }
+            
+            if (-not $buildSuccess) {
+              exit 1
+            }
+            
+            Write-Host "✓ All test projects built successfully"
+            
+            # Run tests on the solution
+            Write-Host "Running tests..."
+            
+            # Look for solution file to run tests at solution level
+            $slnFiles = Get-ChildItem -Filter "*.sln" -File
+            
+            if ($slnFiles.Count -eq 0) {
+              Write-Host "✗ No solution file found in .ci/unit-tests" -ForegroundColor Red
+              exit 1
+            }
+            
+            $slnFile = $slnFiles[0]
+            Write-Host "Running tests on solution: $($slnFile.Name)"
+            dotnet test $slnFile.FullName --configuration ${{ matrix.build-configuration }} --no-build --verbosity normal
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "✗ Tests failed on solution" -ForegroundColor Red
+              exit 1
+            }
+            
+            Write-Host "✓ All tests passed on solution"
+            
+          } finally {
+            Pop-Location
+          }
+        shell: pwsh
   
