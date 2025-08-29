@@ -181,83 +181,23 @@ jobs:
           
           foreach ($dep in $dependencies) {
             Write-Host "Checking branch availability for $dep"
-            Write-Host "  Looking for branch: '$branch_name'"
+            
+            # URL encode the branch name for API calls (handles special characters like #)
+            $encodedBranchName = [System.Web.HttpUtility]::UrlEncode($branch_name)
             
             # Check if target branch exists in the dependency repo
             $branchExists = $false
-            
-            # URL encode the branch name for API calls
-            $encodedBranchName = [System.Web.HttpUtility]::UrlEncode($branch_name)
-            Write-Host "  URL encoded branch: '$encodedBranchName'"
-            
-            # Try method 1: Direct branch API with URL encoding
             try {
               $branchResult = gh api "/repos/$dep/branches/$encodedBranchName" 2>$null
               if ($LASTEXITCODE -eq 0 -and $branchResult) {
                 $branchExists = $true
-                Write-Host "  ✓ Branch '$branch_name' found via direct API"
-              } else {
-                Write-Host "  ⚠ Direct branch API returned no results"
+                Write-Host "  ✓ Branch '$branch_name' exists"
               }
             } catch {
-              Write-Host "  ⚠ Direct branch API failed: $($_.Exception.Message)"
+              # Branch doesn't exist or no access
             }
             
-            # Reset exit code
-            $LASTEXITCODE = 0
-            
-            # Try method 2: Use git ls-remote to check if branch exists
-            if (-not $branchExists) {
-              try {
-                Write-Host "  Trying git ls-remote check..."
-                $remoteRefs = git ls-remote --heads "https://github.com/$dep.git" "$branch_name" 2>$null
-                if ($LASTEXITCODE -eq 0 -and $remoteRefs) {
-                  $branchExists = $true
-                  Write-Host "  ✓ Branch '$branch_name' found via git ls-remote"
-                } else {
-                  Write-Host "  ⚠ Branch not found via git ls-remote"
-                }
-              } catch {
-                Write-Host "  ⚠ Git ls-remote failed: $($_.Exception.Message)"
-              }
-            }
-            
-            # Reset exit code
-            $LASTEXITCODE = 0
-            
-            # Try method 3: List branches with better error handling
-            if (-not $branchExists) {
-              try {
-                Write-Host "  Trying branch list with authentication check..."
-                
-                # First check if we can access the repo at all
-                $repoInfo = gh api "/repos/$dep" 2>$null
-                if ($LASTEXITCODE -eq 0) {
-                  Write-Host "  ✓ Repository is accessible"
-                  
-                  $allBranches = gh api "/repos/$dep/branches?per_page=100" --jq ".[].name" 2>$null
-                  if ($LASTEXITCODE -eq 0 -and $allBranches) {
-                    $branchList = $allBranches -split "`n" | Where-Object { $_.Trim() -ne "" }
-                    Write-Host "  Found $($branchList.Count) branches: $($branchList -join ', ')"
-                    
-                    if ($branchList -contains $branch_name) {
-                      $branchExists = $true
-                      Write-Host "  ✓ Branch '$branch_name' found in branch list"
-                    } else {
-                      Write-Host "  ⚠ Branch '$branch_name' not in list"
-                    }
-                  } else {
-                    Write-Host "  ⚠ Could not retrieve branch list"
-                  }
-                } else {
-                  Write-Host "  ⚠ Repository not accessible (private or no permission)"
-                }
-              } catch {
-                Write-Host "  ⚠ Repository access check failed: $($_.Exception.Message)"
-              }
-            }
-            
-            # Reset exit code
+            # Reset exit code to prevent step failure
             $LASTEXITCODE = 0
             
             if ($branchExists) {
