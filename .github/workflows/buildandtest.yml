@@ -817,11 +817,14 @@ jobs:
 
       - name: Setup Test Toolkit
         run: |
-          Write-Host "Cloning BHoM/Test_Toolkit..."
-          git clone https://github.com/BHoM/Test_Toolkit.git
+          Write-Host "Creating _Dependencies_ folder..."
+          New-Item -ItemType Directory -Force -Path "_Dependencies_" | Out-Null
+          
+          Write-Host "Cloning BHoM/Test_Toolkit into _Dependencies_..."
+          git clone https://github.com/BHoM/Test_Toolkit.git "_Dependencies_\Test_Toolkit"
           
           Write-Host "Checking out Test_Toolkit-InvestigateRunningAllChecksThroughNUnit branch..."
-          Push-Location Test_Toolkit
+          Push-Location "_Dependencies_\Test_Toolkit"
           git checkout Test_Toolkit-InvestigateRunningAllChecksThroughNUnit
           
           Write-Host "Building Test_Toolkit..."
@@ -850,7 +853,7 @@ jobs:
           }
           
           Pop-Location
-          Write-Host "✓ Test_Toolkit setup completed"
+          Write-Host "✓ Test_Toolkit setup completed in _Dependencies_ folder"
         shell: pwsh
 
       - name: Run tests
