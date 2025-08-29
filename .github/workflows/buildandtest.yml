@@ -185,14 +185,17 @@ jobs:
             # Check if target branch exists in the dependency repo
             $branchExists = $false
             try {
-              gh api "/repos/$dep/branches/$branch_name" 2>$null | Out-Null
-              if ($LASTEXITCODE -eq 0) {
+              $result = gh api "/repos/$dep/branches/$branch_name" 2>$null
+              if ($LASTEXITCODE -eq 0 -and $result) {
                 $branchExists = $true
                 Write-Host "  ✓ Branch '$branch_name' exists"
               }
             } catch {
               # Branch doesn't exist or no access
             }
+            
+            # Reset exit code to prevent step failure
+            $LASTEXITCODE = 0
             
             if ($branchExists) {
               $branchMap[$dep] = $branch_name
@@ -211,6 +214,9 @@ jobs:
           # Convert to JSON for use in subsequent steps
           $branchMapJson = $branchMap | ConvertTo-Json -Compress
           echo "branch-map=$branchMapJson" >> $env:GITHUB_OUTPUT
+          
+          # Ensure step always succeeds
+          $LASTEXITCODE = 0
         shell: pwsh
 
       - name: Download dependency artifacts
