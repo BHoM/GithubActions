@@ -15,7 +15,7 @@ on:
         description: '.NET version to use'
         required: false
         type: string
-        default: '6.0.x'
+        default: '8.0.x'
 
     secrets:
       GH_TOKEN:
