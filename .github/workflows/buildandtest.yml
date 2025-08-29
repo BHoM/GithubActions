@@ -179,12 +179,12 @@ jobs:
           Write-Host "Determining branches for dependencies..."
           Write-Host "Target branch: $branch_name"
           
+          # URL encode the branch name for API calls (handles special characters like #)
+          $encodedBranchName = [System.Web.HttpUtility]::UrlEncode($branch_name)
+
           foreach ($dep in $dependencies) {
             Write-Host "Checking branch availability for $dep"
-            
-            # URL encode the branch name for API calls (handles special characters like #)
-            $encodedBranchName = [System.Web.HttpUtility]::UrlEncode($branch_name)
-            
+
             # Check if target branch exists in the dependency repo
             $branchExists = $false
             try {
