@@ -29,11 +29,14 @@ on:
         required: false
 
 jobs:
-  discover-configurations:
+  prepare-dependencies:
     runs-on: windows-latest
     outputs:
       build-configurations: ${{ steps.discover-configs.outputs.build-configurations }}
       release-configurations: ${{ steps.discover-configs.outputs.release-configurations }}
+      dependencies-built: ${{ steps.build-summary.outputs.dependencies-built }}
+    env:
+      BHoMFolder: "C:\\ProgramData\\BHoM"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -116,16 +119,7 @@ jobs:
           echo "release-configurations=$releaseConfigsJson" >> $env:GITHUB_OUTPUT
         shell: pwsh
 
-  resolve-and-build-dependencies:
-    runs-on: windows-latest
-    needs: discover-configurations
-    outputs:
-      dependencies-built: ${{ steps.build-summary.outputs.dependencies-built }}
-    env:
-      BHoMFolder: "C:\\ProgramData\\BHoM"
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+
 
       - name: Parse dependencies
         id: parse-deps
@@ -264,7 +258,7 @@ jobs:
               Write-Host "Found successful run: $run_id for $dep on $target_branch"
               
               # Get Release configurations to try
-              $releaseConfigs = '${{ needs.discover-configurations.outputs.release-configurations }}' | ConvertFrom-Json
+              $releaseConfigs = '${{ steps.discover-configs.outputs.release-configurations }}' | ConvertFrom-Json
               if ($releaseConfigs.Count -eq 0) { $releaseConfigs = @("Release") }
               
               $found = $false
@@ -528,7 +522,7 @@ jobs:
               }
               
               # Get release configurations to build
-              $releaseConfigs = '${{ needs.discover-configurations.outputs.release-configurations }}' | ConvertFrom-Json
+              $releaseConfigs = '${{ steps.discover-configs.outputs.release-configurations }}' | ConvertFrom-Json
               
               # If no release configs found, fallback to just "Release"
               if ($releaseConfigs.Count -eq 0) {
@@ -630,10 +624,10 @@ jobs:
 
   build:
     runs-on: windows-latest
-    needs: [discover-configurations, resolve-and-build-dependencies]
+    needs: prepare-dependencies
     strategy:
       matrix:
-        build-configuration: ${{ fromJson(needs.discover-configurations.outputs.build-configurations) }}
+        build-configuration: ${{ fromJson(needs.prepare-dependencies.outputs.build-configurations) }}
     env:
       BHoMFolder: "C:\\ProgramData\\BHoM"
     steps:
@@ -651,7 +645,7 @@ jobs:
         shell: pwsh
 
       - name: Download dependencies
-        if: needs.resolve-and-build-dependencies.outputs.dependencies-built == 'true'
+        if: needs.prepare-dependencies.outputs.dependencies-built == 'true'
         uses: actions/download-artifact@v4
         with:
           name: Dependencies
