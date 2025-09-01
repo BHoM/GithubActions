@@ -967,8 +967,12 @@ jobs:
             # Skip known non-test DLLs
             $dllBaseName = $dll.BaseName
             if ($dllBaseName -eq "NUnit_Engine" -or $dllBaseName -eq "TestSetup_Engine" -or 
+                $dllBaseName -eq "testhost" -or $dllBaseName -eq "testcentric.engine.metadata" -or
                 $dllBaseName.StartsWith("System.") -or $dllBaseName.StartsWith("Microsoft.") -or
-                $dllBaseName.StartsWith("nunit.", [System.StringComparison]::OrdinalIgnoreCase)) {
+                $dllBaseName.StartsWith("nunit.", [System.StringComparison]::OrdinalIgnoreCase) -or
+                $dllBaseName.StartsWith("NUnit3.") -or
+                $dllBaseName.StartsWith("Newtonsoft.") -or $dllBaseName.StartsWith("NuGet.") -or
+                $dllBaseName.EndsWith("_oM") -or $dllBaseName.EndsWith("_Engine")) {
               Write-Host "  - Skipping known non-test DLL: $($dll.Name)" -ForegroundColor Gray
               continue
             }
