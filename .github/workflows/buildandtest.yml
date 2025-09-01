@@ -873,11 +873,13 @@ jobs:
                 # Debug: Try different comparison methods
                 Write-Host "Trying git diff develop...HEAD:"
                 $changedFiles1 = git diff --name-only develop...HEAD 2>&1
-                Write-Host "Exit code: $LASTEXITCODE, Files count: $($changedFiles1.Count if $changedFiles1 else 0)"
+                $count1 = if ($changedFiles1) { $changedFiles1.Count } else { 0 }
+                Write-Host "Exit code: $LASTEXITCODE, Files count: $count1"
                 
                 Write-Host "Trying git diff develop HEAD:"
                 $changedFiles2 = git diff --name-only develop HEAD 2>&1
-                Write-Host "Exit code: $LASTEXITCODE, Files count: $($changedFiles2.Count if $changedFiles2 else 0)"
+                $count2 = if ($changedFiles2) { $changedFiles2.Count } else { 0 }
+                Write-Host "Exit code: $LASTEXITCODE, Files count: $count2"
                 
                 Write-Host "Trying git diff --name-status develop...HEAD:"
                 $changedFilesStatus = git diff --name-status develop...HEAD 2>&1
