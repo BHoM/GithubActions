@@ -1005,6 +1005,21 @@ jobs:
             try {
               # Get recent successful runs for this branch
               $encodedBranch = [System.Web.HttpUtility]::UrlEncode($branch)
+              
+              # Debug: First get all runs to see what's available
+              Write-Host "Debug: Getting all recent runs for branch '$branch'..."
+              $allRunsResponse = gh api "/repos/$targetRepo/actions/runs?per_page=10" 2>$null
+              if ($allRunsResponse) {
+                $allRuns = $allRunsResponse | ConvertFrom-Json
+                Write-Host "Debug: Found $($allRuns.workflow_runs.Count) total runs"
+                foreach ($run in $allRuns.workflow_runs | Select-Object -First 5) {
+                  Write-Host "  Run ID: $($run.id), Branch: $($run.head_branch), Conclusion: $($run.conclusion), Status: $($run.status)"
+                }
+              } else {
+                Write-Host "Debug: No runs data returned from API"
+              }
+              
+              # Now try to get successful runs for this specific branch
               $runsResponse = gh api "/repos/$targetRepo/actions/runs?per_page=20" --jq ".workflow_runs[] | select(.head_branch == `"$branch`" and .conclusion == `"success`") | .id" 2>$null
               
               if ($runsResponse -and $runsResponse.Count -gt 0) {
@@ -1100,6 +1115,97 @@ jobs:
                   }
                 } else {
                   Write-Host "No successful runs found on branch '$branch'"
+                  
+                  # If this is the target branch, also try specific known run IDs as fallback
+                  if ($branch -eq $branchName) {
+                    Write-Host "Debug: Trying direct access to recent runs..."
+                    # Try to get the most recent runs and look for artifacts directly
+                    $recentRuns = gh api "/repos/$targetRepo/actions/runs?per_page=5" --jq ".workflow_runs[] | select(.head_branch == `"$branch`") | .id" 2>$null
+                    if ($recentRuns) {
+                      Write-Host "Debug: Found recent runs on branch: $($recentRuns -join ', ')"
+                      foreach ($runId in $recentRuns) {
+                        Write-Host "Debug: Checking artifacts for run $runId..."
+                        try {
+                          $artifactsResponse = gh api "/repos/$targetRepo/actions/runs/$runId/artifacts" --jq ".artifacts[] | select(.name == `"$artifactName`") | .id" 2>$null
+                          if ($artifactsResponse) {
+                            $artifactId = $artifactsResponse | Select-Object -First 1
+                            Write-Host "Debug: Found artifact '$artifactName' with ID: $artifactId in run $runId"
+                            
+                            # Download the artifact
+                            Write-Host "Downloading artifact..."
+                            gh api "/repos/$targetRepo/actions/artifacts/$artifactId/zip" > "$artifactName.zip"
+                            
+                            if (Test-Path "$artifactName.zip") {
+                              Write-Host "✓ Successfully downloaded $artifactName.zip from run $runId"
+                              
+                              # Create _Tests_ directory
+                              if (Test-Path "_Tests_") {
+                                Write-Host "Removing existing _Tests_ folder..."
+                                Remove-Item "_Tests_" -Recurse -Force
+                              }
+                              New-Item -ItemType Directory -Force -Path "_Tests_" | Out-Null
+                              
+                              # Extract the artifact
+                              Write-Host "Extracting artifact to _Tests_ folder..."
+                              Expand-Archive "$artifactName.zip" -DestinationPath "_Tests_" -Force
+                              
+                              # Check if there's a nested zip file inside
+                              $nestedZip = Get-ChildItem "_Tests_" -Filter "Test_Toolkit_Tests.zip" -File
+                              if ($nestedZip) {
+                                Write-Host "Found nested zip file, extracting contents..."
+                                
+                                # Extract the nested zip directly to _Tests_ (not in a subfolder)
+                                $tempDir = "_Tests_\temp_extract"
+                                New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+                                Expand-Archive $nestedZip.FullName -DestinationPath $tempDir -Force
+                                
+                                # Move contents from temp directory to _Tests_ root
+                                Get-ChildItem $tempDir -Recurse | ForEach-Object {
+                                  $relativePath = $_.FullName.Replace("$tempDir\", "")
+                                  $destPath = Join-Path "_Tests_" $relativePath
+                                  
+                                  if ($_.PSIsContainer) {
+                                    if (-not (Test-Path $destPath)) {
+                                      New-Item -ItemType Directory -Force -Path $destPath | Out-Null
+                                    }
+                                  } else {
+                                    $destDir = Split-Path $destPath -Parent
+                                    if (-not (Test-Path $destDir)) {
+                                      New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+                                    }
+                                    Copy-Item $_.FullName -Destination $destPath -Force
+                                  }
+                                }
+                                
+                                # Clean up
+                                Remove-Item $tempDir -Recurse -Force
+                                Remove-Item $nestedZip.FullName -Force
+                              }
+                              
+                              # Clean up the downloaded zip
+                              Remove-Item "$artifactName.zip" -Force
+                              
+                              # Show what we extracted
+                              Write-Host "✓ Test artifacts extracted to _Tests_ folder:"
+                              $testFiles = Get-ChildItem "_Tests_" -Recurse -File | Select-Object -First 10
+                              foreach ($file in $testFiles) {
+                                $relativePath = $file.FullName.Replace("$((Get-Location).Path)\_Tests_\", "")
+                                Write-Host "  $relativePath"
+                              }
+                              if ((Get-ChildItem "_Tests_" -Recurse -File).Count -gt 10) {
+                                Write-Host "  ... and $((Get-ChildItem "_Tests_" -Recurse -File).Count - 10) more files"
+                              }
+                              
+                              $foundArtifact = $true
+                              break
+                            }
+                          }
+                        } catch {
+                          Write-Host "Debug: Could not check artifacts for run $runId : $($_.Exception.Message)"
+                        }
+                      }
+                    }
+                  }
                 }
               } catch {
                 Write-Host "⚠ Error accessing runs for branch '$branch': $($_.Exception.Message)"
