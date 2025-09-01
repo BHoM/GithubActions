@@ -1110,8 +1110,6 @@ jobs:
                 $processArgs = @(
                   "test"
                   "`"$($testDll.FullPath)`""
-                  "--configuration"
-                  "${{ matrix.build-configuration }}"
                   "--verbosity"
                   "normal"
                   "--logger"
@@ -1139,7 +1137,7 @@ jobs:
                 & dotnet @processArgs
               } else {
                 Write-Host "Running without additional parameters"
-                dotnet test "$($testDll.FullPath)" --configuration ${{ matrix.build-configuration }} --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
+                dotnet test "$($testDll.FullPath)" --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
               }
               
               if ($LASTEXITCODE -eq 0) {
