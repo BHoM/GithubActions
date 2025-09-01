@@ -749,6 +749,28 @@ jobs:
           name: Dependencies
           path: ${{ env.BHoMFolder }}
 
+      - name: Copy libs folder to BHoM assemblies
+        run: |
+          if (Test-Path "libs") {
+            Write-Host "Found libs folder, copying DLL files to BHoM assemblies..."
+            $libsDlls = Get-ChildItem "libs" -Filter "*.dll" -File -Recurse
+            
+            if ($libsDlls.Count -gt 0) {
+              Write-Host "Found $($libsDlls.Count) DLL files in libs folder:"
+              foreach ($dll in $libsDlls) {
+                $destinationPath = Join-Path "$env:BHoMFolder\Assemblies" $dll.Name
+                Copy-Item $dll.FullName -Destination $destinationPath -Force
+                Write-Host "  Copied: $($dll.Name)"
+              }
+              Write-Host "✓ Successfully copied $($libsDlls.Count) DLL files from libs folder"
+            } else {
+              Write-Host "No DLL files found in libs folder"
+            }
+          } else {
+            Write-Host "No libs folder found, skipping DLL copy"
+          }
+        shell: pwsh
+
       - name: Take pre-build snapshot
         run: |
           # Take snapshot of BHoM folder before build
