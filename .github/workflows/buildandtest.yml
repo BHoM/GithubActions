@@ -863,31 +863,67 @@ jobs:
               
               if ($LASTEXITCODE -eq 0) {
                 Write-Host "Successfully fetched develop branch, comparing files..."
-                $changedFiles = git diff --name-only develop...HEAD 2>&1
                 
-                if ($LASTEXITCODE -eq 0 -and $changedFiles) {
-                  # Convert to full paths and join with semicolons
-                  $fullPaths = @()
-                  foreach ($file in $changedFiles) {
-                    if ($file -and $file.Trim()) {
-                      $fullPath = Join-Path (Get-Location) $file.Trim()
-                      $fullPaths += $fullPath
-                    }
+                # Debug: Show current commit and develop commit
+                $currentCommit = git rev-parse HEAD
+                $developCommit = git rev-parse develop
+                Write-Host "Current commit: $currentCommit"
+                Write-Host "Develop commit: $developCommit"
+                
+                # Debug: Try different comparison methods
+                Write-Host "Trying git diff develop...HEAD:"
+                $changedFiles1 = git diff --name-only develop...HEAD 2>&1
+                Write-Host "Exit code: $LASTEXITCODE, Files count: $($changedFiles1.Count if $changedFiles1 else 0)"
+                
+                Write-Host "Trying git diff develop HEAD:"
+                $changedFiles2 = git diff --name-only develop HEAD 2>&1
+                Write-Host "Exit code: $LASTEXITCODE, Files count: $($changedFiles2.Count if $changedFiles2 else 0)"
+                
+                Write-Host "Trying git diff --name-status develop...HEAD:"
+                $changedFilesStatus = git diff --name-status develop...HEAD 2>&1
+                Write-Host "Exit code: $LASTEXITCODE"
+                if ($changedFilesStatus) {
+                  Write-Host "Files with status:"
+                  foreach ($line in $changedFilesStatus) {
+                    Write-Host "  $line"
                   }
-                  
-                  if ($fullPaths.Count -gt 0) {
-                    $changedFilesString = $fullPaths -join ';'
-                    Write-Host "Changed files ($($fullPaths.Count)):"
-                    foreach ($file in $fullPaths) {
-                      Write-Host "  $file"
+                }
+                
+                # Use the first method but with better handling
+                $changedFiles = $changedFiles1
+                $gitDiffExitCode = $LASTEXITCODE
+                
+                # Reset exit code for this step
+                $LASTEXITCODE = 0
+                
+                if ($gitDiffExitCode -eq 0) {
+                  if ($changedFiles -and $changedFiles.Count -gt 0) {
+                    # Convert to full paths and join with semicolons
+                    $fullPaths = @()
+                    foreach ($file in $changedFiles) {
+                      if ($file -and $file.Trim()) {
+                        $fullPath = Join-Path (Get-Location) $file.Trim()
+                        $fullPaths += $fullPath
+                      }
                     }
-                    echo "changed-files=$changedFilesString" >> $env:GITHUB_OUTPUT
+                    
+                    if ($fullPaths.Count -gt 0) {
+                      $changedFilesString = $fullPaths -join ';'
+                      Write-Host "Changed files ($($fullPaths.Count)):"
+                      foreach ($file in $fullPaths) {
+                        Write-Host "  $file"
+                      }
+                      echo "changed-files=$changedFilesString" >> $env:GITHUB_OUTPUT
+                    } else {
+                      Write-Host "No valid changed files detected after filtering"
+                      echo "changed-files=" >> $env:GITHUB_OUTPUT
+                    }
                   } else {
-                    Write-Host "No changed files detected after filtering"
+                    Write-Host "No changes found compared to develop branch (this is normal)"
                     echo "changed-files=" >> $env:GITHUB_OUTPUT
                   }
                 } else {
-                  Write-Host "No changes found compared to develop branch"
+                  Write-Host "Git diff returned exit code $gitDiffExitCode, treating as no changes"
                   echo "changed-files=" >> $env:GITHUB_OUTPUT
                 }
               } else {
@@ -899,6 +935,9 @@ jobs:
               Write-Host "Skipping changed files detection"
               echo "changed-files=" >> $env:GITHUB_OUTPUT
             }
+            
+            # Ensure step always succeeds
+            $LASTEXITCODE = 0
           }
         shell: pwsh
 
