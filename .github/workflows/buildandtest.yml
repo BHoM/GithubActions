@@ -625,6 +625,8 @@ jobs:
   build:
     runs-on: windows-latest
     needs: prepare-dependencies
+    outputs:
+      test-dll-names: ${{ steps.identify-tests.outputs.test-dll-names }}
     strategy:
       matrix:
         build-configuration: ${{ fromJson(needs.prepare-dependencies.outputs.build-configurations) }}
@@ -748,6 +750,7 @@ jobs:
         shell: pwsh
 
       - name: Package build outputs
+        id: package-outputs
         run: |
           # Load pre-build state
           $preFiles = @{}
@@ -806,6 +809,32 @@ jobs:
             # Create empty marker file so artifact isn't empty
             "No files changed during build" | Out-File "artifact\no-changes.txt"
           }
+          
+          # Collect all DLL files from BHoM Assemblies folder for test parameters
+          $assemblyPath = Join-Path "$env:BHoMFolder" "Assemblies"
+          Write-Host "Collecting DLL files from: $assemblyPath"
+          
+          if (Test-Path $assemblyPath) {
+            $dllFiles = Get-ChildItem -Path $assemblyPath -Filter "*.dll" -File
+            if ($dllFiles) {
+              $dllPaths = @()
+              foreach ($dll in $dllFiles) {
+                $dllPaths += $dll.FullName
+              }
+              $dllPathsString = $dllPaths -join ';'
+              Write-Host "Found $($dllFiles.Count) DLL files for test parameters:"
+              foreach ($dll in $dllFiles) {
+                Write-Host "  $($dll.FullName)"
+              }
+              echo "updated-assemblies=$dllPathsString" >> $env:GITHUB_OUTPUT
+            } else {
+              Write-Host "No DLL files found in assemblies folder"
+              echo "updated-assemblies=" >> $env:GITHUB_OUTPUT
+            }
+          } else {
+            Write-Host "Assemblies folder not found: $assemblyPath"
+            echo "updated-assemblies=" >> $env:GITHUB_OUTPUT
+          }
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -815,120 +844,202 @@ jobs:
           retention-days: 90
           compression-level: 6
 
-      - name: Setup Test Toolkit
+      - name: Get changed files
+        id: changed-files
         run: |
-          Write-Host "Creating _Dependencies_ folder..."
-          New-Item -ItemType Directory -Force -Path "_Dependencies_" | Out-Null
+          $branchName = '${{ inputs.branch_name }}'
+          Write-Host "Current branch: $branchName"
           
-          Write-Host "Cloning BHoM/Test_Toolkit into _Dependencies_..."
-          git clone https://github.com/BHoM/Test_Toolkit.git "_Dependencies_\Test_Toolkit"
-          
-          Write-Host "Checking out Test_Toolkit-InvestigateRunningAllChecksThroughNUnit branch..."
-          Push-Location "_Dependencies_\Test_Toolkit"
-          git checkout Test_Toolkit-InvestigateRunningAllChecksThroughNUnit
-          
-          Write-Host "Building Test_Toolkit..."
-          # Find solution file in Test_Toolkit
-          $slnFiles = Get-ChildItem -Filter "*.sln" -File
-          if ($slnFiles.Count -gt 0) {
-            $slnFile = $slnFiles[0]
-            Write-Host "Building $($slnFile.Name) with configuration Debug"
-            
-            # Try dotnet build first
-            dotnet build $slnFile.Name --configuration Debug
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "✓ Successfully built Test_Toolkit with dotnet build"
-            } else {
-              Write-Host "⚠ dotnet build failed, trying MSBuild..." -ForegroundColor Yellow
-              msbuild $slnFile.Name /p:Configuration=Debug /p:Platform="Any CPU" /m
-              if ($LASTEXITCODE -eq 0) {
-                Write-Host "✓ Successfully built Test_Toolkit with MSBuild"
-              } else {
-                Write-Host "✗ Failed to build Test_Toolkit" -ForegroundColor Red
-                exit 1
-              }
-            }
+          if ($branchName -eq 'develop') {
+            Write-Host "Running on develop branch - no changed files to track"
+            echo "changed-files=" >> $env:GITHUB_OUTPUT
           } else {
-            Write-Host "⚠ No solution file found in Test_Toolkit" -ForegroundColor Yellow
+            Write-Host "Getting list of changed files compared to develop..."
+            $changedFiles = git diff --name-only origin/develop...HEAD
+            if ($changedFiles) {
+              # Convert to full paths and join with semicolons
+              $fullPaths = @()
+              foreach ($file in $changedFiles) {
+                $fullPath = Join-Path (Get-Location) $file
+                $fullPaths += $fullPath
+              }
+              $changedFilesString = $fullPaths -join ';'
+              Write-Host "Changed files:"
+              foreach ($file in $fullPaths) {
+                Write-Host "  $file"
+              }
+              echo "changed-files=$changedFilesString" >> $env:GITHUB_OUTPUT
+            } else {
+              Write-Host "No changed files detected"
+              echo "changed-files=" >> $env:GITHUB_OUTPUT
+            }
           }
-          
-          Pop-Location
-          Write-Host "✓ Test_Toolkit setup completed in _Dependencies_ folder"
         shell: pwsh
 
-      - name: Run tests
+      - name: Identify tests
+        id: identify-tests
         run: |
-          Write-Host "Changing to test directory: .ci/unit-tests"
-          if (-not (Test-Path ".ci/unit-tests")) {
-            Write-Host "✗ Test directory .ci/unit-tests not found" -ForegroundColor Red
+          Write-Host "Searching for test DLLs in _Tests_ folder..."
+          
+          if (-not (Test-Path "_Tests_")) {
+            Write-Host "✗ _Tests_ folder not found" -ForegroundColor Red
             exit 1
           }
           
-          Push-Location ".ci/unit-tests"
+          # Find all DLL files in _Tests_ folder that contain unit tests
+          $testDlls = @()
+          $allDlls = Get-ChildItem "_Tests_" -Filter "*.dll" -File -Recurse
           
-          try {
-            Write-Host "Building only test projects in configuration ${{ matrix.build-configuration }}..."
+          if ($allDlls.Count -eq 0) {
+            Write-Host "✗ No DLL files found in _Tests_ folder" -ForegroundColor Red
+            exit 1
+          }
+          
+          Write-Host "Found $($allDlls.Count) DLL files, pre-filtering for NUnit references..."
+          
+          foreach ($dll in $allDlls) {
+            Write-Host "Checking: $($dll.Name)"
             
-            # Find all .csproj files in the current directory and subdirectories
-            $testProjects = Get-ChildItem -Filter "*.csproj" -File -Recurse
-            
-            if ($testProjects.Count -eq 0) {
-              Write-Host "✗ No test project files found in .ci/unit-tests" -ForegroundColor Red
-              exit 1
+            # Skip known non-test DLLs
+            $dllBaseName = $dll.BaseName
+            if ($dllBaseName -eq "NUnit_Engine" -or $dllBaseName -eq "TestSetup_Engine" -or 
+                $dllBaseName.StartsWith("System.") -or $dllBaseName.StartsWith("Microsoft.")) {
+              Write-Host "  - Skipping known non-test DLL: $($dll.Name)" -ForegroundColor Gray
+              continue
             }
             
-            Write-Host "Found $($testProjects.Count) test project(s):"
-            foreach ($project in $testProjects) {
-              Write-Host "  - $($project.Name) (in $($project.Directory.Name))"
-            }
-            
-            # Build each test project individually (this will skip already-built referenced projects)
-            $buildSuccess = $true
-            foreach ($project in $testProjects) {
-              Write-Host "Building test project: $($project.Name)..."
-              dotnet build $project.FullName --configuration ${{ matrix.build-configuration }} --verbosity normal --no-dependencies
-              if ($LASTEXITCODE -ne 0) {
-                Write-Host "✗ Failed to build test project: $($project.Name)" -ForegroundColor Red
-                $buildSuccess = $false
-                break
+            # Pre-filter: Check if DLL references NUnit using reflection
+            try {
+              $assembly = [System.Reflection.Assembly]::ReflectionOnlyLoadFrom($dll.FullName)
+              $referencedAssemblies = $assembly.GetReferencedAssemblies()
+              $hasNUnit = $referencedAssemblies | Where-Object { $_.Name -like "*nunit*" -or $_.Name -like "*NUnit*" }
+              
+              if (-not $hasNUnit) {
+                Write-Host "  - No NUnit reference found in $($dll.Name), skipping" -ForegroundColor Gray
+                continue
               }
-              Write-Host "✓ Successfully built: $($project.Name)"
+              
+              Write-Host "  ✓ NUnit reference found, checking for actual tests..." -ForegroundColor Cyan
+            } catch {
+              Write-Host "  - Could not load assembly $($dll.Name), trying test discovery anyway..." -ForegroundColor Yellow
             }
             
-            if (-not $buildSuccess) {
-              exit 1
-            }
+            # Use dotnet test --list-tests to check if DLL contains tests
+            # Redirect stderr to null to avoid noise from non-test DLLs
+            $testListOutput = & dotnet test "$($dll.FullName)" --list-tests --verbosity quiet 2>$null
             
-            Write-Host "✓ All test projects built successfully"
-            
-            # Run tests on the solution
-            Write-Host "Running tests..."
-            
-            # Look for solution file to run tests at solution level
-            $slnFiles = Get-ChildItem -Filter "*.sln" -File
-            
-            if ($slnFiles.Count -eq 0) {
-              Write-Host "✗ No solution file found in .ci/unit-tests" -ForegroundColor Red
-              exit 1
-            }
-            
-            $slnFile = $slnFiles[0]
-            Write-Host "Running tests on solution: $($slnFile.Name)"
-            
-            # Create test-results directory
-            New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
-            
-            # Run tests with TRX logger for test reporting
-            dotnet test $slnFile.FullName --configuration ${{ matrix.build-configuration }} --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx" --results-directory test-results
-            
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "✓ All tests passed on solution"
+            if ($LASTEXITCODE -eq 0 -and $testListOutput -and ($testListOutput | Where-Object { $_ -match "^\s*\w" })) {
+              $testCount = ($testListOutput | Where-Object { $_ -match "^\s*\w" }).Count
+              Write-Host "✓ Found $testCount tests in $($dll.Name)" -ForegroundColor Green
+              $testDlls += @{
+                Name = $dll.BaseName
+                FullPath = $dll.FullName
+                TestCount = $testCount
+              }
             } else {
-              Write-Host "⚠ Some tests failed on solution" -ForegroundColor Yellow
+              Write-Host "  - No tests found in $($dll.Name)" -ForegroundColor Yellow
             }
+          }
+          
+          if ($testDlls.Count -eq 0) {
+            Write-Host "✗ No test DLLs found in _Tests_ folder" -ForegroundColor Red
+            exit 1
+          }
+          
+          Write-Host "✓ Identified $($testDlls.Count) test DLL(s):"
+          foreach ($testDll in $testDlls) {
+            Write-Host "  - $($testDll.Name) ($($testDll.TestCount) tests)"
+          }
+          
+          # Convert to JSON for output
+          $testDllsJson = $testDlls | ConvertTo-Json -Compress
+          echo "test-dlls=$testDllsJson" >> $env:GITHUB_OUTPUT
+          
+          # Also output just the names for matrix strategy
+          $testDllNames = $testDlls | ForEach-Object { $_.Name }
+          $testDllNamesJson = $testDllNames | ConvertTo-Json -Compress
+          echo "test-dll-names=$testDllNamesJson" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      - name: Run individual tests
+        run: |
+          $testDlls = '${{ steps.identify-tests.outputs.test-dlls }}' | ConvertFrom-Json
+          
+          if (-not $testDlls -or $testDlls.Count -eq 0) {
+            Write-Host "✗ No test DLLs identified" -ForegroundColor Red
+            exit 1
+          }
+          
+          # Create test-results directory
+          New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
+          
+          # Prepare test parameters
+          $testParams = @()
+          
+          # Add UpdatedAssemblies parameter if available
+          $updatedAssemblies = '${{ steps.package-outputs.outputs.updated-assemblies }}'
+          if ($updatedAssemblies) {
+            $testParams += "-- TestRunParameters.Parameter(name=`"UpdatedAssemblies`", value=`"$updatedAssemblies`")"
+            Write-Host "Will use UpdatedAssemblies parameter with $($updatedAssemblies.Split(';').Count) assemblies"
+          }
+          
+          # Add UpdatedFiles parameter if available (only for non-develop branches)
+          $changedFiles = '${{ steps.changed-files.outputs.changed-files }}'
+          if ($changedFiles) {
+            $testParams += "-- TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
+            Write-Host "Will use UpdatedFiles parameter with $($changedFiles.Split(';').Count) files"
+          }
+          
+          $testParamsString = if ($testParams.Count -gt 0) { $testParams -join ' ' } else { "" }
+          
+          $overallSuccess = $true
+          $testResults = @()
+          
+          foreach ($testDll in $testDlls) {
+            Write-Host "Running tests for: $($testDll.Name) ($($testDll.TestCount) tests)"
             
-          } finally {
-            Pop-Location
+            $logFileName = "test-results-$($testDll.Name).trx"
+            Write-Host "Log file: $logFileName"
+            
+            try {
+              if ($testParamsString) {
+                Write-Host "Running with parameters: $testParamsString"
+                cmd /c "dotnet test `"$($testDll.FullPath)`" --configuration ${{ matrix.build-configuration }} --verbosity normal --logger `"trx;LogFileName=$logFileName`" --results-directory test-results $testParamsString"
+              } else {
+                Write-Host "Running without additional parameters"
+                dotnet test "$($testDll.FullPath)" --configuration ${{ matrix.build-configuration }} --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
+              }
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "✓ Tests passed for $($testDll.Name)" -ForegroundColor Green
+                $testResults += @{ Name = $testDll.Name; Status = "Passed"; LogFile = $logFileName }
+              } else {
+                Write-Host "⚠ Some tests failed for $($testDll.Name)" -ForegroundColor Yellow
+                $overallSuccess = $false
+                $testResults += @{ Name = $testDll.Name; Status = "Failed"; LogFile = $logFileName }
+              }
+            } catch {
+              Write-Host "✗ Error running tests for $($testDll.Name): $($_.Exception.Message)" -ForegroundColor Red
+              $overallSuccess = $false
+              $testResults += @{ Name = $testDll.Name; Status = "Error"; LogFile = $logFileName }
+            }
+          }
+          
+          Write-Host "Test execution summary:"
+          foreach ($result in $testResults) {
+            $status = switch ($result.Status) {
+              "Passed" { "✓ PASSED" }
+              "Failed" { "⚠ FAILED" }
+              "Error"  { "✗ ERROR" }
+            }
+            Write-Host "  $($result.Name): $status"
+          }
+          
+          if (-not $overallSuccess) {
+            Write-Host "⚠ Some test DLLs had failures" -ForegroundColor Yellow
+            exit 1
+          } else {
+            Write-Host "✓ All test DLLs passed" -ForegroundColor Green
           }
         shell: pwsh
 
@@ -937,12 +1048,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-results-${{ matrix.build-configuration }}
-          path: .ci/unit-tests/test-results/test-results.trx
+          path: test-results/*.trx
 
   test-report:
-    if: always()
+    if: always() && needs.build.outputs.test-dll-names != '[]'
     runs-on: ubuntu-latest
     needs: build
+    strategy:
+      matrix:
+        test-dll: ${{ fromJson(needs.build.outputs.test-dll-names) }}
+      fail-fast: false
 
     steps:
       - name: Checkout repository
@@ -955,12 +1070,12 @@ jobs:
           path: test-results
           merge-multiple: true
 
-      - name: Create Test Report
+      - name: Create Test Report for ${{ matrix.test-dll }}
         if: always()
         uses: dorny/test-reporter@v1
         with:
-          name: Dotnet Test Results
-          path: test-results/**/*.trx
+          name: Test Results - ${{ matrix.test-dll }}
+          path: test-results/**/test-results-${{ matrix.test-dll }}.trx
           reporter: dotnet-trx
         env:
           GITHUB_TOKEN: ${{ github.token }}
