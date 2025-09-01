@@ -1089,28 +1089,10 @@ jobs:
           # Create test-results directory
           New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
           
-          # Prepare test parameters
-          $testParams = @()
-          
-          # Add UpdatedAssemblies parameter if available
+          # Check if we have test parameters to add
           $updatedAssemblies = '${{ steps.package-outputs.outputs.updated-assemblies }}'
-          if ($updatedAssemblies) {
-            # Escape quotes for VSTest format: TestRunParameters.Parameter(name=\"<name>\", value=\"<value>\")
-            $escapedAssemblies = $updatedAssemblies.Replace('\', '\\').Replace('"', '\"')
-            $testParams += "-- TestRunParameters.Parameter(name=\`"UpdatedAssemblies\`", value=\`"$escapedAssemblies\`")"
-            Write-Host "Will use UpdatedAssemblies parameter with $($updatedAssemblies.Split(';').Count) assemblies"
-          }
-          
-          # Add UpdatedFiles parameter if available (only for non-develop branches)
           $changedFiles = '${{ needs.prepare-dependencies.outputs.changed-files }}'
-          if ($changedFiles) {
-            # Escape quotes for VSTest format: TestRunParameters.Parameter(name=\"<name>\", value=\"<value>\")
-            $escapedFiles = $changedFiles.Replace('\', '\\').Replace('"', '\"')
-            $testParams += "-- TestRunParameters.Parameter(name=\`"UpdatedFiles\`", value=\`"$escapedFiles\`")"
-            Write-Host "Will use UpdatedFiles parameter with $($changedFiles.Split(';').Count) files"
-          }
-          
-          $testParamsString = if ($testParams.Count -gt 0) { $testParams -join ' ' } else { "" }
+          $hasTestParams = $updatedAssemblies -or $changedFiles
           
           $overallSuccess = $true
           $testResults = @()
@@ -1122,12 +1104,39 @@ jobs:
             Write-Host "Log file: $logFileName"
             
             try {
-              if ($testParamsString) {
-                Write-Host "Running with parameters: $testParamsString"
-                # Use Invoke-Expression to properly handle the test parameters
-                $command = "dotnet test `"$($testDll.FullPath)`" --configuration ${{ matrix.build-configuration }} --verbosity normal --logger `"trx;LogFileName=$logFileName`" --results-directory test-results $testParamsString"
-                Write-Host "Executing command: $command"
-                Invoke-Expression $command
+              if ($hasTestParams) {
+                Write-Host "Running with test parameters"
+                # Use Start-Process to avoid PowerShell escaping issues
+                $processArgs = @(
+                  "test"
+                  "`"$($testDll.FullPath)`""
+                  "--configuration"
+                  "${{ matrix.build-configuration }}"
+                  "--verbosity"
+                  "normal"
+                  "--logger"
+                  "trx;LogFileName=$logFileName"
+                  "--results-directory"
+                  "test-results"
+                )
+                
+                # Add test parameters as separate arguments
+                $processArgs += "--"
+                
+                # Add UpdatedAssemblies parameter if available
+                $updatedAssemblies = '${{ steps.package-outputs.outputs.updated-assemblies }}'
+                if ($updatedAssemblies) {
+                  $processArgs += "TestRunParameters.Parameter(name=`"UpdatedAssemblies`", value=`"$updatedAssemblies`")"
+                }
+                
+                # Add UpdatedFiles parameter if available
+                $changedFiles = '${{ needs.prepare-dependencies.outputs.changed-files }}'
+                if ($changedFiles) {
+                  $processArgs += "TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
+                }
+                
+                Write-Host "Executing: dotnet $($processArgs -join ' ')"
+                & dotnet @processArgs
               } else {
                 Write-Host "Running without additional parameters"
                 dotnet test "$($testDll.FullPath)" --configuration ${{ matrix.build-configuration }} --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
