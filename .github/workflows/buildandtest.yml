@@ -855,22 +855,48 @@ jobs:
             echo "changed-files=" >> $env:GITHUB_OUTPUT
           } else {
             Write-Host "Getting list of changed files compared to develop..."
-            $changedFiles = git diff --name-only origin/develop...HEAD
-            if ($changedFiles) {
-              # Convert to full paths and join with semicolons
-              $fullPaths = @()
-              foreach ($file in $changedFiles) {
-                $fullPath = Join-Path (Get-Location) $file
-                $fullPaths += $fullPath
+            
+            # Fetch develop branch for comparison
+            try {
+              Write-Host "Fetching develop branch..."
+              git fetch origin develop:develop 2>&1 | Write-Host
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "Successfully fetched develop branch, comparing files..."
+                $changedFiles = git diff --name-only develop...HEAD 2>&1
+                
+                if ($LASTEXITCODE -eq 0 -and $changedFiles) {
+                  # Convert to full paths and join with semicolons
+                  $fullPaths = @()
+                  foreach ($file in $changedFiles) {
+                    if ($file -and $file.Trim()) {
+                      $fullPath = Join-Path (Get-Location) $file.Trim()
+                      $fullPaths += $fullPath
+                    }
+                  }
+                  
+                  if ($fullPaths.Count -gt 0) {
+                    $changedFilesString = $fullPaths -join ';'
+                    Write-Host "Changed files ($($fullPaths.Count)):"
+                    foreach ($file in $fullPaths) {
+                      Write-Host "  $file"
+                    }
+                    echo "changed-files=$changedFilesString" >> $env:GITHUB_OUTPUT
+                  } else {
+                    Write-Host "No changed files detected after filtering"
+                    echo "changed-files=" >> $env:GITHUB_OUTPUT
+                  }
+                } else {
+                  Write-Host "No changes found compared to develop branch"
+                  echo "changed-files=" >> $env:GITHUB_OUTPUT
+                }
+              } else {
+                Write-Host "⚠ Could not fetch develop branch, skipping changed files detection" -ForegroundColor Yellow
+                echo "changed-files=" >> $env:GITHUB_OUTPUT
               }
-              $changedFilesString = $fullPaths -join ';'
-              Write-Host "Changed files:"
-              foreach ($file in $fullPaths) {
-                Write-Host "  $file"
-              }
-              echo "changed-files=$changedFilesString" >> $env:GITHUB_OUTPUT
-            } else {
-              Write-Host "No changed files detected"
+            } catch {
+              Write-Host "⚠ Error during git operations: $($_.Exception.Message)" -ForegroundColor Yellow
+              Write-Host "Skipping changed files detection"
               echo "changed-files=" >> $env:GITHUB_OUTPUT
             }
           }
