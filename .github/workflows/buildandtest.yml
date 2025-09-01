@@ -1095,16 +1095,18 @@ jobs:
           # Add UpdatedAssemblies parameter if available
           $updatedAssemblies = '${{ steps.package-outputs.outputs.updated-assemblies }}'
           if ($updatedAssemblies) {
-            # Use single quotes to avoid escaping issues
-            $testParams += "-- TestRunParameters.Parameter(name=UpdatedAssemblies, value='$updatedAssemblies')"
+            # Escape quotes for VSTest format: TestRunParameters.Parameter(name=\"<name>\", value=\"<value>\")
+            $escapedAssemblies = $updatedAssemblies.Replace('\', '\\').Replace('"', '\"')
+            $testParams += "-- TestRunParameters.Parameter(name=\`"UpdatedAssemblies\`", value=\`"$escapedAssemblies\`")"
             Write-Host "Will use UpdatedAssemblies parameter with $($updatedAssemblies.Split(';').Count) assemblies"
           }
           
           # Add UpdatedFiles parameter if available (only for non-develop branches)
           $changedFiles = '${{ needs.prepare-dependencies.outputs.changed-files }}'
           if ($changedFiles) {
-            # Use single quotes to avoid escaping issues
-            $testParams += "-- TestRunParameters.Parameter(name=UpdatedFiles, value='$changedFiles')"
+            # Escape quotes for VSTest format: TestRunParameters.Parameter(name=\"<name>\", value=\"<value>\")
+            $escapedFiles = $changedFiles.Replace('\', '\\').Replace('"', '\"')
+            $testParams += "-- TestRunParameters.Parameter(name=\`"UpdatedFiles\`", value=\`"$escapedFiles\`")"
             Write-Host "Will use UpdatedFiles parameter with $($changedFiles.Split(';').Count) files"
           }
           
