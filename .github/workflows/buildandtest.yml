@@ -906,29 +906,24 @@ jobs:
             "No files changed during build" | Out-File "artifact\no-changes.txt"
           }
           
-          # Collect all DLL files from BHoM Assemblies folder for test parameters
-          $assemblyPath = Join-Path "$env:BHoMFolder" "Assemblies"
-          Write-Host "Collecting DLL files from: $assemblyPath"
+          # Collect only the DLL files that were built and changed in this run
+          Write-Host "Filtering changed files for DLL assemblies only..."
           
-          if (Test-Path $assemblyPath) {
-            $dllFiles = Get-ChildItem -Path $assemblyPath -Filter "*.dll" -File
-            if ($dllFiles) {
-              $dllPaths = @()
-              foreach ($dll in $dllFiles) {
-                $dllPaths += $dll.FullName
-              }
-              $dllPathsString = $dllPaths -join ';'
-              Write-Host "Found $($dllFiles.Count) DLL files for test parameters:"
-              foreach ($dll in $dllFiles) {
-                Write-Host "  $($dll.FullName)"
-              }
-              echo "updated-assemblies=$dllPathsString" >> $env:GITHUB_OUTPUT
-            } else {
-              Write-Host "No DLL files found in assemblies folder"
-              echo "updated-assemblies=" >> $env:GITHUB_OUTPUT
+          $updatedDlls = @()
+          foreach ($file in $changedFiles) {
+            if ($file.EndsWith(".dll", [System.StringComparison]::OrdinalIgnoreCase) -and 
+                $file.Contains("$env:BHoMFolder\Assemblies\")) {
+              $updatedDlls += $file
+              Write-Host "  Found updated assembly: $($file.Replace("$env:BHoMFolder\", ''))"
             }
+          }
+          
+          if ($updatedDlls.Count -gt 0) {
+            $updatedDllsString = $updatedDlls -join ';'
+            Write-Host "Found $($updatedDlls.Count) updated DLL files for test parameters"
+            echo "updated-assemblies=$updatedDllsString" >> $env:GITHUB_OUTPUT
           } else {
-            Write-Host "Assemblies folder not found: $assemblyPath"
+            Write-Host "No updated DLL files found in assemblies folder"
             echo "updated-assemblies=" >> $env:GITHUB_OUTPUT
           }
 
