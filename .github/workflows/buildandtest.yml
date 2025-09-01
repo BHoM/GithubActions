@@ -973,11 +973,56 @@ jobs:
               continue
             }
             
-            # Pre-filter: Use dotnet test to check if DLL contains NUnit tests
-            # This is more reliable than reflection and also validates the tests are runnable
-            Write-Host "  - Checking for NUnit tests..." -ForegroundColor Cyan
+            # Pre-filter: Check if DLL references nunit.framework.dll using ildasm or alternative methods
+            $hasNUnitReference = $false
             
-            # First, try to list tests with dotnet test
+            try {
+              # Method 1: Try using System.Reflection.MetadataLoadContext (more modern approach)
+              Add-Type -AssemblyName System.Reflection.MetadataLoadContext -ErrorAction SilentlyContinue
+              if ([System.Reflection.MetadataLoadContext] -ne $null) {
+                $resolver = [System.Reflection.PathAssemblyResolver]::new(@($dll.Directory.FullName, [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()))
+                $mlc = [System.Reflection.MetadataLoadContext]::new($resolver)
+                try {
+                  $assembly = $mlc.LoadFromAssemblyPath($dll.FullName)
+                  $referencedAssemblies = $assembly.GetReferencedAssemblies()
+                  $hasNUnitReference = $referencedAssemblies | Where-Object { $_.Name -eq "nunit.framework" }
+                  if ($hasNUnitReference) {
+                    Write-Host "  ✓ NUnit framework reference found" -ForegroundColor Cyan
+                  } else {
+                    Write-Host "  - No NUnit framework reference found, skipping" -ForegroundColor Gray
+                  }
+                } finally {
+                  $mlc.Dispose()
+                }
+              } else {
+                throw "MetadataLoadContext not available"
+              }
+            } catch {
+              # Method 2: Fallback to checking file dependencies using PowerShell and .NET reflection
+              try {
+                # Load assembly in a separate AppDomain context to avoid locking
+                $assemblyBytes = [System.IO.File]::ReadAllBytes($dll.FullName)
+                $assembly = [System.Reflection.Assembly]::Load($assemblyBytes)
+                $referencedAssemblies = $assembly.GetReferencedAssemblies()
+                $hasNUnitReference = $referencedAssemblies | Where-Object { $_.Name -eq "nunit.framework" }
+                if ($hasNUnitReference) {
+                  Write-Host "  ✓ NUnit framework reference found (via fallback method)" -ForegroundColor Cyan
+                } else {
+                  Write-Host "  - No NUnit framework reference found, skipping" -ForegroundColor Gray
+                }
+              } catch {
+                Write-Host "  - Could not determine NUnit reference for $($dll.Name), skipping" -ForegroundColor Yellow
+                $hasNUnitReference = $false
+              }
+            }
+            
+            # Skip if no NUnit reference found
+            if (-not $hasNUnitReference) {
+              continue
+            }
+            
+            # Now check for actual tests using dotnet test
+            Write-Host "  - Checking for actual tests..." -ForegroundColor Cyan
             $testListOutput = & dotnet test "$($dll.FullName)" --list-tests --verbosity quiet 2>&1
             $testListExitCode = $LASTEXITCODE
             
@@ -993,36 +1038,18 @@ jobs:
               }
               
               if ($testLines -and $testLines.Count -gt 0) {
-                # Additional check: verify these are actually NUnit tests by looking for NUnit-specific patterns
-                $nunitIndicators = $testListOutput | Where-Object { 
-                  $_ -match "NUnit" -or 
-                  $_ -match "TestFixture" -or 
-                  $_ -match "Test\(" -or
-                  $_ -match "\.Tests\." -or
-                  $_ -match "Test_"
-                }
-                
-                # Also check if any test lines look like NUnit test methods (contain namespace with Test patterns)
-                $hasNUnitPattern = $testLines | Where-Object { 
-                  $_ -match "Test" -and ($_ -match "\." -or $_ -match "Test_" -or $_ -match "_Test")
-                }
-                
-                if ($nunitIndicators -or $hasNUnitPattern) {
-                  $testCount = $testLines.Count
-                  Write-Host "✓ Found $testCount NUnit tests in $($dll.Name)" -ForegroundColor Green
-                  $testDlls += @{
-                    Name = $dll.BaseName
-                    FullPath = $dll.FullName
-                    TestCount = $testCount
-                  }
-                } else {
-                  Write-Host "  - Found tests but not NUnit tests in $($dll.Name), skipping" -ForegroundColor Yellow
+                $testCount = $testLines.Count
+                Write-Host "✓ Found $testCount NUnit tests in $($dll.Name)" -ForegroundColor Green
+                $testDlls += @{
+                  Name = $dll.BaseName
+                  FullPath = $dll.FullName
+                  TestCount = $testCount
                 }
               } else {
-                Write-Host "  - No test methods found in $($dll.Name)" -ForegroundColor Gray
+                Write-Host "  - No test methods found in $($dll.Name)" -ForegroundColor Yellow
               }
             } else {
-              Write-Host "  - Cannot run tests on $($dll.Name) (exit code: $testListExitCode)" -ForegroundColor Gray
+              Write-Host "  - Cannot run tests on $($dll.Name) (exit code: $testListExitCode)" -ForegroundColor Yellow
             }
           }
           
