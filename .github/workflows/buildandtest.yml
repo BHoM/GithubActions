@@ -1095,14 +1095,18 @@ jobs:
           # Add UpdatedAssemblies parameter if available
           $updatedAssemblies = '${{ steps.package-outputs.outputs.updated-assemblies }}'
           if ($updatedAssemblies) {
-            $testParams += "-- TestRunParameters.Parameter(name=`"UpdatedAssemblies`", value=`"$updatedAssemblies`")"
+            # Escape quotes properly for command line
+            $escapedAssemblies = $updatedAssemblies.Replace('"', '""')
+            $testParams += "-- TestRunParameters.Parameter(name=UpdatedAssemblies, value=""$escapedAssemblies"")"
             Write-Host "Will use UpdatedAssemblies parameter with $($updatedAssemblies.Split(';').Count) assemblies"
           }
           
-                      # Add UpdatedFiles parameter if available (only for non-develop branches)
-            $changedFiles = '${{ needs.prepare-dependencies.outputs.changed-files }}'
+          # Add UpdatedFiles parameter if available (only for non-develop branches)
+          $changedFiles = '${{ needs.prepare-dependencies.outputs.changed-files }}'
           if ($changedFiles) {
-            $testParams += "-- TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
+            # Escape quotes properly for command line
+            $escapedFiles = $changedFiles.Replace('"', '""')
+            $testParams += "-- TestRunParameters.Parameter(name=UpdatedFiles, value=""$escapedFiles"")"
             Write-Host "Will use UpdatedFiles parameter with $($changedFiles.Split(';').Count) files"
           }
           
