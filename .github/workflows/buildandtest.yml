@@ -1120,7 +1120,7 @@ jobs:
             try {
               if ($testParamsString) {
                 Write-Host "Running with parameters: $testParamsString"
-                cmd /c "dotnet test `"$($testDll.FullPath)`" --configuration ${{ matrix.build-configuration }} --verbosity normal --logger `"trx;LogFileName=$logFileName`" --results-directory test-results $testParamsString"
+                dotnet test "$($testDll.FullPath)" --configuration ${{ matrix.build-configuration }} --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results --% $testParamsString
               } else {
                 Write-Host "Running without additional parameters"
                 dotnet test "$($testDll.FullPath)" --configuration ${{ matrix.build-configuration }} --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
