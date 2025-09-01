@@ -922,6 +922,31 @@ jobs:
             Copy-Item $file -Destination $destPath -Force
           }
           
+          # Also include any files from libs folder that were copied to BHoM assemblies during build
+          if (Test-Path "libs") {
+            Write-Host "Checking for libs files that may have been copied during build..."
+            $libsFiles = Get-ChildItem "libs" -Filter "*" -File -Recurse
+            
+            foreach ($libFile in $libsFiles) {
+              $assemblyPath = Join-Path "$env:BHoMFolder\Assemblies" $libFile.Name
+              if (Test-Path $assemblyPath) {
+                # Check if this file from libs exists in BHoM assemblies and include it in artifact
+                $relativePath = "Assemblies\$($libFile.Name)"
+                $destPath = Join-Path "artifact" $relativePath
+                $destDir = Split-Path $destPath -Parent
+                
+                # Create destination directory if it doesn't exist
+                if (-not (Test-Path $destDir)) {
+                  New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+                }
+                
+                # Copy the file from BHoM assemblies (not from libs, to get the version that was actually used)
+                Copy-Item $assemblyPath -Destination $destPath -Force
+                Write-Host "  Included libs file in artifact: $($libFile.Name)"
+              }
+            }
+          }
+          
           if ($changedFiles.Count -eq 0) {
             Write-Host "No files were changed in $env:BHoMFolder during build"
             # Create empty marker file so artifact isn't empty
