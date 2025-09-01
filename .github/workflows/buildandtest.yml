@@ -35,6 +35,7 @@ jobs:
       build-configurations: ${{ steps.discover-configs.outputs.build-configurations }}
       release-configurations: ${{ steps.discover-configs.outputs.release-configurations }}
       dependencies-built: ${{ steps.build-summary.outputs.dependencies-built }}
+      changed-files: ${{ steps.get-changed-files.outputs.changed-files }}
     env:
       BHoMFolder: "C:\\ProgramData\\BHoM"
     steps:
@@ -129,6 +130,101 @@ jobs:
             echo "dependencies=$deps" >> $env:GITHUB_OUTPUT
           } else {
             echo "dependencies=[]" >> $env:GITHUB_OUTPUT
+          }
+        shell: pwsh
+
+      - name: Get changed files
+        id: get-changed-files
+        run: |
+          $branchName = '${{ inputs.branch_name }}'
+          Write-Host "Current branch: $branchName"
+          
+          if ($branchName -eq 'develop') {
+            Write-Host "Running on develop branch - no changed files to track"
+            echo "changed-files=" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "Getting list of changed files compared to develop..."
+            
+            # Fetch develop branch for comparison
+            try {
+              Write-Host "Fetching develop branch..."
+              git fetch origin develop:develop 2>&1 | Write-Host
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "Successfully fetched develop branch, comparing files..."
+                
+                # Debug: Show current commit and develop commit
+                $currentCommit = git rev-parse HEAD
+                $developCommit = git rev-parse develop
+                Write-Host "Current commit: $currentCommit"
+                Write-Host "Develop commit: $developCommit"
+                
+                # Compare current branch (HEAD) with develop using two-dot syntax
+                Write-Host "Comparing current branch with develop branch..."
+                $changedFiles = git diff --name-only develop HEAD 2>&1
+                $gitDiffExitCode = $LASTEXITCODE
+                
+                Write-Host "Git diff exit code: $gitDiffExitCode"
+                if ($changedFiles) {
+                  Write-Host "Found $($changedFiles.Count) changed files"
+                  # Show first few files for debugging
+                  $displayCount = [Math]::Min(5, $changedFiles.Count)
+                  Write-Host "First $displayCount files:"
+                  for ($i = 0; $i -lt $displayCount; $i++) {
+                    Write-Host "  $($changedFiles[$i])"
+                  }
+                  if ($changedFiles.Count -gt 5) {
+                    Write-Host "  ... and $($changedFiles.Count - 5) more files"
+                  }
+                } else {
+                  Write-Host "No files returned from git diff"
+                }
+                
+                # Reset exit code for this step
+                $LASTEXITCODE = 0
+                
+                if ($gitDiffExitCode -eq 0) {
+                  if ($changedFiles -and $changedFiles.Count -gt 0) {
+                    # Convert to full paths and join with semicolons
+                    $fullPaths = @()
+                    foreach ($file in $changedFiles) {
+                      if ($file -and $file.Trim()) {
+                        $fullPath = Join-Path (Get-Location) $file.Trim()
+                        $fullPaths += $fullPath
+                      }
+                    }
+                    
+                    if ($fullPaths.Count -gt 0) {
+                      $changedFilesString = $fullPaths -join ';'
+                      Write-Host "Changed files ($($fullPaths.Count)):"
+                      foreach ($file in $fullPaths) {
+                        Write-Host "  $file"
+                      }
+                      echo "changed-files=$changedFilesString" >> $env:GITHUB_OUTPUT
+                    } else {
+                      Write-Host "No valid changed files detected after filtering"
+                      echo "changed-files=" >> $env:GITHUB_OUTPUT
+                    }
+                  } else {
+                    Write-Host "No changes found compared to develop branch (this is normal)"
+                    echo "changed-files=" >> $env:GITHUB_OUTPUT
+                  }
+                } else {
+                  Write-Host "Git diff returned exit code $gitDiffExitCode, treating as no changes"
+                  echo "changed-files=" >> $env:GITHUB_OUTPUT
+                }
+              } else {
+                Write-Host "⚠ Could not fetch develop branch, skipping changed files detection" -ForegroundColor Yellow
+                echo "changed-files=" >> $env:GITHUB_OUTPUT
+              }
+            } catch {
+              Write-Host "⚠ Error during git operations: $($_.Exception.Message)" -ForegroundColor Yellow
+              Write-Host "Skipping changed files detection"
+              echo "changed-files=" >> $env:GITHUB_OUTPUT
+            }
+            
+            # Ensure step always succeeds
+            $LASTEXITCODE = 0
           }
         shell: pwsh
 
@@ -844,101 +940,6 @@ jobs:
           retention-days: 90
           compression-level: 6
 
-      - name: Get changed files
-        id: changed-files
-        run: |
-          $branchName = '${{ inputs.branch_name }}'
-          Write-Host "Current branch: $branchName"
-          
-          if ($branchName -eq 'develop') {
-            Write-Host "Running on develop branch - no changed files to track"
-            echo "changed-files=" >> $env:GITHUB_OUTPUT
-          } else {
-            Write-Host "Getting list of changed files compared to develop..."
-            
-            # Fetch develop branch for comparison
-            try {
-              Write-Host "Fetching develop branch..."
-              git fetch origin develop:develop 2>&1 | Write-Host
-              
-              if ($LASTEXITCODE -eq 0) {
-                Write-Host "Successfully fetched develop branch, comparing files..."
-                
-                # Debug: Show current commit and develop commit
-                $currentCommit = git rev-parse HEAD
-                $developCommit = git rev-parse develop
-                Write-Host "Current commit: $currentCommit"
-                Write-Host "Develop commit: $developCommit"
-                
-                # Compare current branch (HEAD) with develop using two-dot syntax
-                Write-Host "Comparing current branch with develop branch..."
-                $changedFiles = git diff --name-only develop HEAD 2>&1
-                $gitDiffExitCode = $LASTEXITCODE
-                
-                Write-Host "Git diff exit code: $gitDiffExitCode"
-                if ($changedFiles) {
-                  Write-Host "Found $($changedFiles.Count) changed files"
-                  # Show first few files for debugging
-                  $displayCount = [Math]::Min(5, $changedFiles.Count)
-                  Write-Host "First $displayCount files:"
-                  for ($i = 0; $i -lt $displayCount; $i++) {
-                    Write-Host "  $($changedFiles[$i])"
-                  }
-                  if ($changedFiles.Count -gt 5) {
-                    Write-Host "  ... and $($changedFiles.Count - 5) more files"
-                  }
-                } else {
-                  Write-Host "No files returned from git diff"
-                }
-                
-                # Reset exit code for this step
-                $LASTEXITCODE = 0
-                
-                if ($gitDiffExitCode -eq 0) {
-                  if ($changedFiles -and $changedFiles.Count -gt 0) {
-                    # Convert to full paths and join with semicolons
-                    $fullPaths = @()
-                    foreach ($file in $changedFiles) {
-                      if ($file -and $file.Trim()) {
-                        $fullPath = Join-Path (Get-Location) $file.Trim()
-                        $fullPaths += $fullPath
-                      }
-                    }
-                    
-                    if ($fullPaths.Count -gt 0) {
-                      $changedFilesString = $fullPaths -join ';'
-                      Write-Host "Changed files ($($fullPaths.Count)):"
-                      foreach ($file in $fullPaths) {
-                        Write-Host "  $file"
-                      }
-                      echo "changed-files=$changedFilesString" >> $env:GITHUB_OUTPUT
-                    } else {
-                      Write-Host "No valid changed files detected after filtering"
-                      echo "changed-files=" >> $env:GITHUB_OUTPUT
-                    }
-                  } else {
-                    Write-Host "No changes found compared to develop branch (this is normal)"
-                    echo "changed-files=" >> $env:GITHUB_OUTPUT
-                  }
-                } else {
-                  Write-Host "Git diff returned exit code $gitDiffExitCode, treating as no changes"
-                  echo "changed-files=" >> $env:GITHUB_OUTPUT
-                }
-              } else {
-                Write-Host "⚠ Could not fetch develop branch, skipping changed files detection" -ForegroundColor Yellow
-                echo "changed-files=" >> $env:GITHUB_OUTPUT
-              }
-            } catch {
-              Write-Host "⚠ Error during git operations: $($_.Exception.Message)" -ForegroundColor Yellow
-              Write-Host "Skipping changed files detection"
-              echo "changed-files=" >> $env:GITHUB_OUTPUT
-            }
-            
-            # Ensure step always succeeds
-            $LASTEXITCODE = 0
-          }
-        shell: pwsh
-
       - name: Identify tests
         id: identify-tests
         run: |
@@ -1047,8 +1048,8 @@ jobs:
             Write-Host "Will use UpdatedAssemblies parameter with $($updatedAssemblies.Split(';').Count) assemblies"
           }
           
-          # Add UpdatedFiles parameter if available (only for non-develop branches)
-          $changedFiles = '${{ steps.changed-files.outputs.changed-files }}'
+                      # Add UpdatedFiles parameter if available (only for non-develop branches)
+            $changedFiles = '${{ needs.prepare-dependencies.outputs.changed-files }}'
           if ($changedFiles) {
             $testParams += "-- TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
             Write-Host "Will use UpdatedFiles parameter with $($changedFiles.Split(';').Count) files"
