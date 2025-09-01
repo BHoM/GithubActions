@@ -870,30 +870,26 @@ jobs:
                 Write-Host "Current commit: $currentCommit"
                 Write-Host "Develop commit: $developCommit"
                 
-                # Debug: Try different comparison methods
-                Write-Host "Trying git diff develop...HEAD:"
-                $changedFiles1 = git diff --name-only develop...HEAD 2>&1
-                $count1 = if ($changedFiles1) { $changedFiles1.Count } else { 0 }
-                Write-Host "Exit code: $LASTEXITCODE, Files count: $count1"
-                
-                Write-Host "Trying git diff develop HEAD:"
-                $changedFiles2 = git diff --name-only develop HEAD 2>&1
-                $count2 = if ($changedFiles2) { $changedFiles2.Count } else { 0 }
-                Write-Host "Exit code: $LASTEXITCODE, Files count: $count2"
-                
-                Write-Host "Trying git diff --name-status develop...HEAD:"
-                $changedFilesStatus = git diff --name-status develop...HEAD 2>&1
-                Write-Host "Exit code: $LASTEXITCODE"
-                if ($changedFilesStatus) {
-                  Write-Host "Files with status:"
-                  foreach ($line in $changedFilesStatus) {
-                    Write-Host "  $line"
-                  }
-                }
-                
-                # Use the first method but with better handling
-                $changedFiles = $changedFiles1
+                # Compare current branch (HEAD) with develop using two-dot syntax
+                Write-Host "Comparing current branch with develop branch..."
+                $changedFiles = git diff --name-only develop HEAD 2>&1
                 $gitDiffExitCode = $LASTEXITCODE
+                
+                Write-Host "Git diff exit code: $gitDiffExitCode"
+                if ($changedFiles) {
+                  Write-Host "Found $($changedFiles.Count) changed files"
+                  # Show first few files for debugging
+                  $displayCount = [Math]::Min(5, $changedFiles.Count)
+                  Write-Host "First $displayCount files:"
+                  for ($i = 0; $i -lt $displayCount; $i++) {
+                    Write-Host "  $($changedFiles[$i])"
+                  }
+                  if ($changedFiles.Count -gt 5) {
+                    Write-Host "  ... and $($changedFiles.Count - 5) more files"
+                  }
+                } else {
+                  Write-Host "No files returned from git diff"
+                }
                 
                 # Reset exit code for this step
                 $LASTEXITCODE = 0
