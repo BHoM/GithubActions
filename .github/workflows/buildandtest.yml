@@ -973,36 +973,56 @@ jobs:
               continue
             }
             
-            # Pre-filter: Check if DLL references NUnit using reflection
-            try {
-              $assembly = [System.Reflection.Assembly]::ReflectionOnlyLoadFrom($dll.FullName)
-              $referencedAssemblies = $assembly.GetReferencedAssemblies()
-              $hasNUnit = $referencedAssemblies | Where-Object { $_.Name -like "*nunit*" -or $_.Name -like "*NUnit*" }
-              
-              if (-not $hasNUnit) {
-                Write-Host "  - No NUnit reference found in $($dll.Name), skipping" -ForegroundColor Gray
-                continue
+            # Pre-filter: Use dotnet test to check if DLL contains NUnit tests
+            # This is more reliable than reflection and also validates the tests are runnable
+            Write-Host "  - Checking for NUnit tests..." -ForegroundColor Cyan
+            
+            # First, try to list tests with dotnet test
+            $testListOutput = & dotnet test "$($dll.FullName)" --list-tests --verbosity quiet 2>&1
+            $testListExitCode = $LASTEXITCODE
+            
+            if ($testListExitCode -eq 0 -and $testListOutput) {
+              # Filter out non-test lines and look for actual test methods
+              $testLines = $testListOutput | Where-Object { 
+                $_ -and $_.Trim() -and 
+                $_ -notmatch "^Test run for" -and 
+                $_ -notmatch "^Microsoft \(R\)" -and 
+                $_ -notmatch "^Copyright \(c\)" -and
+                $_ -notmatch "^\s*$" -and
+                $_ -match "^\s*\w" 
               }
               
-              Write-Host "  ✓ NUnit reference found, checking for actual tests..." -ForegroundColor Cyan
-            } catch {
-              Write-Host "  - Could not load assembly $($dll.Name), trying test discovery anyway..." -ForegroundColor Yellow
-            }
-            
-            # Use dotnet test --list-tests to check if DLL contains tests
-            # Redirect stderr to null to avoid noise from non-test DLLs
-            $testListOutput = & dotnet test "$($dll.FullName)" --list-tests --verbosity quiet 2>$null
-            
-            if ($LASTEXITCODE -eq 0 -and $testListOutput -and ($testListOutput | Where-Object { $_ -match "^\s*\w" })) {
-              $testCount = ($testListOutput | Where-Object { $_ -match "^\s*\w" }).Count
-              Write-Host "✓ Found $testCount tests in $($dll.Name)" -ForegroundColor Green
-              $testDlls += @{
-                Name = $dll.BaseName
-                FullPath = $dll.FullName
-                TestCount = $testCount
+              if ($testLines -and $testLines.Count -gt 0) {
+                # Additional check: verify these are actually NUnit tests by looking for NUnit-specific patterns
+                $nunitIndicators = $testListOutput | Where-Object { 
+                  $_ -match "NUnit" -or 
+                  $_ -match "TestFixture" -or 
+                  $_ -match "Test\(" -or
+                  $_ -match "\.Tests\." -or
+                  $_ -match "Test_"
+                }
+                
+                # Also check if any test lines look like NUnit test methods (contain namespace with Test patterns)
+                $hasNUnitPattern = $testLines | Where-Object { 
+                  $_ -match "Test" -and ($_ -match "\." -or $_ -match "Test_" -or $_ -match "_Test")
+                }
+                
+                if ($nunitIndicators -or $hasNUnitPattern) {
+                  $testCount = $testLines.Count
+                  Write-Host "✓ Found $testCount NUnit tests in $($dll.Name)" -ForegroundColor Green
+                  $testDlls += @{
+                    Name = $dll.BaseName
+                    FullPath = $dll.FullName
+                    TestCount = $testCount
+                  }
+                } else {
+                  Write-Host "  - Found tests but not NUnit tests in $($dll.Name), skipping" -ForegroundColor Yellow
+                }
+              } else {
+                Write-Host "  - No test methods found in $($dll.Name)" -ForegroundColor Gray
               }
             } else {
-              Write-Host "  - No tests found in $($dll.Name)" -ForegroundColor Yellow
+              Write-Host "  - Cannot run tests on $($dll.Name) (exit code: $testListExitCode)" -ForegroundColor Gray
             }
           }
           
