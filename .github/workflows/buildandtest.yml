@@ -1120,7 +1120,10 @@ jobs:
             try {
               if ($testParamsString) {
                 Write-Host "Running with parameters: $testParamsString"
-                dotnet test "$($testDll.FullPath)" --configuration ${{ matrix.build-configuration }} --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results --% $testParamsString
+                # Use Invoke-Expression to properly handle the test parameters
+                $command = "dotnet test `"$($testDll.FullPath)`" --configuration ${{ matrix.build-configuration }} --verbosity normal --logger `"trx;LogFileName=$logFileName`" --results-directory test-results $testParamsString"
+                Write-Host "Executing command: $command"
+                Invoke-Expression $command
               } else {
                 Write-Host "Running without additional parameters"
                 dotnet test "$($testDll.FullPath)" --configuration ${{ matrix.build-configuration }} --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
