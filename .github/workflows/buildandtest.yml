@@ -988,7 +988,7 @@ jobs:
           
           $targetRepo = "BHoM/Test_Toolkit"
           $branchName = '${{ inputs.branch_name }}'
-          $artifactName = "Test_Toolkit_Tests"
+          $artifactName = "Tests"
           
           # Branch priority order
           $branchesToTry = @(
@@ -1083,7 +1083,7 @@ jobs:
           }
           
           if (-not $foundArtifact) {
-            Write-Host "✗ Could not find Test Toolkit Tests artifact from any branch" -ForegroundColor Red
+            Write-Host "✗ Could not find Tests artifact from any branch" -ForegroundColor Red
             Write-Host "Tried branches: $($branchesToTry -join ', ')"
             
             # Create empty _Tests_ folder so the workflow can continue
