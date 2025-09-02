@@ -920,6 +920,7 @@ jobs:
     outputs:
       test-dll-names: ${{ steps.identify-tests.outputs.test-dll-names }}
     strategy:
+      fail-fast: false
       matrix:
         build-configuration: ${{ fromJson(needs.prepare-dependencies.outputs.build-configurations) }}
     env:
