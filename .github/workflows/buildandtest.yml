@@ -441,7 +441,7 @@ jobs:
                 $downloaded_artifacts += $dep
                 Write-Host "✓ Completed artifact downloads for $dep"
               } else {
-                Write-Host "Available artifacts in run $run_id:"
+                Write-Host "Available artifacts in run ${run_id}:"
                 foreach ($art in $allArtifacts.artifacts) {
                   Write-Host "  - $($art.name)"
                 }
