@@ -358,81 +358,95 @@ jobs:
               $run_id = $latestRun.id
               Write-Host "Found latest CI Build and Test workflow run: $run_id for $dep on $target_branch (status: $($latestRun.status), conclusion: $($latestRun.conclusion))"
               
-              # If the run is still in progress, wait for it to complete
-              if ($latestRun.status -eq "in_progress" -or $latestRun.status -eq "queued") {
-                Write-Host "Run $run_id is still running, waiting for completion..."
-                $waitAttempts = 0
-                $maxWaitAttempts = 10
-                
-                while ($waitAttempts -lt $maxWaitAttempts) {
+              # Get Release configurations to try
+              $releaseConfigs = '${{ steps.discover-configs.outputs.release-configurations }}' | ConvertFrom-Json
+              if ($releaseConfigs.Count -eq 0) { $releaseConfigs = @("Release") }
+              
+              $found = $false
+              $waitAttempts = 0
+              $maxWaitAttempts = 10
+              
+              # Check for artifacts, even if workflow is still running
+              while ($waitAttempts -le $maxWaitAttempts -and -not $found) {
+                if ($waitAttempts -gt 0) {
+                  Write-Host "Wait attempt $waitAttempts/$maxWaitAttempts - checking for artifacts..."
                   Start-Sleep -Seconds 10
-                  $waitAttempts++
-                  Write-Host "Wait attempt $waitAttempts/$maxWaitAttempts..."
-                  
-                  # Check run status again
+                }
+                
+                # Check run status and artifacts
+                if ($waitAttempts -gt 0) {
                   $runStatusResponse = gh api "/repos/$dep/actions/runs/$run_id" 2>$null
                   if ($runStatusResponse) {
-                    $runStatus = $runStatusResponse | ConvertFrom-Json
-                    Write-Host "Run status: $($runStatus.status), conclusion: $($runStatus.conclusion)"
+                    $latestRun = $runStatusResponse | ConvertFrom-Json
+                    Write-Host "Run status: $($latestRun.status), conclusion: $($latestRun.conclusion)"
+                  }
+                }
+                
+                # Check if artifacts are available
+                $artifactsResponse = gh api "/repos/$dep/actions/runs/$run_id/artifacts" 2>$null
+                if ($artifactsResponse) {
+                  $allArtifacts = $artifactsResponse | ConvertFrom-Json
+                  
+                  if ($allArtifacts.artifacts -and $allArtifacts.artifacts.Count -gt 0) {
+                    Write-Host "Run has $($allArtifacts.artifacts.Count) artifacts available"
                     
-                    if ($runStatus.status -eq "completed") {
-                      Write-Host "✓ Run completed after waiting"
-                      $latestRun = $runStatus
+                    # Look for the specific artifacts we need
+                    foreach ($releaseConfig in $releaseConfigs) {
+                      $artifact_name = "build-outputs-$target_branch-$releaseConfig"
+                      Write-Host "Looking for artifact: $artifact_name"
+                      
+                      $targetArtifact = $allArtifacts.artifacts | Where-Object { $_.name -eq $artifact_name }
+                      
+                      if ($targetArtifact) {
+                        Write-Host "✓ Found artifact: $artifact_name from $dep"
+                        $dep_safe = $dep.Replace('/', '_')
+                        
+                        # Download and extract
+                        gh api "/repos/$dep/actions/artifacts/$($targetArtifact.id)/zip" > "${dep_safe}_artifact.zip"
+                        New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
+                        Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
+                        
+                        # Copy to BHoM folder
+                        if (Test-Path "dependencies\$dep_safe") {
+                          Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
+                        }
+                        
+                        Write-Host "✓ Successfully downloaded artifact for $dep for configuration $releaseConfig"
+                        $found = $true
+                        break
+                      }
+                    }
+                    
+                    if ($found) {
                       break
                     }
                   }
                 }
                 
-                if ($latestRun.status -ne "completed") {
-                  Write-Host "✗ Run did not complete after $maxWaitAttempts wait attempts - will need to build"
-                  continue
-                }
-              }
-              
-              # Get Release configurations to try
-              $releaseConfigs = '${{ steps.discover-configs.outputs.release-configurations }}' | ConvertFrom-Json
-              if ($releaseConfigs.Count -eq 0) { $releaseConfigs = @("Release") }
-              
-              # Check if the run has any artifacts at all
-              $artifactsResponse = gh api "/repos/$dep/actions/runs/$run_id/artifacts" 2>$null
-              if (-not $artifactsResponse) {
-                Write-Host "✗ Could not access artifacts for run $run_id" -ForegroundColor Red
-                Write-Host "✗ CRITICAL ERROR: Cannot access dependency artifacts for $dep" -ForegroundColor Red
-                exit 1
-              }
-              
-              $allArtifacts = $artifactsResponse | ConvertFrom-Json
-              if (-not $allArtifacts.artifacts -or $allArtifacts.artifacts.Count -eq 0) {
-                Write-Host "✗ CRITICAL ERROR: Completed run $run_id has no artifacts for dependency $dep" -ForegroundColor Red
-                Write-Host "This indicates the dependency build failed or did not produce expected outputs." -ForegroundColor Red
-                exit 1
-              }
-              
-              Write-Host "Run has $($allArtifacts.artifacts.Count) artifacts available"
-              
-              $found = $false
-              foreach ($releaseConfig in $releaseConfigs) {
-                $artifact_name = "build-outputs-$target_branch-$releaseConfig"
-                Write-Host "Looking for artifact: $artifact_name"
-                
-                $targetArtifact = $allArtifacts.artifacts | Where-Object { $_.name -eq $artifact_name }
-                
-                if ($targetArtifact) {
-                  Write-Host "✓ Found artifact: $artifact_name from $dep"
-                  $dep_safe = $dep.Replace('/', '_')
-                  
-                  # Download and extract
-                  gh api "/repos/$dep/actions/artifacts/$($targetArtifact.id)/zip" > "${dep_safe}_artifact.zip"
-                  New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
-                  Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
-                  
-                  # Copy to BHoM folder
-                  if (Test-Path "dependencies\$dep_safe") {
-                    Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
+                # If workflow is completed and we still haven't found artifacts, exit with error
+                if ($latestRun.status -eq "completed" -and -not $found) {
+                  if ($allArtifacts.artifacts -and $allArtifacts.artifacts.Count -gt 0) {
+                    Write-Host "Available artifacts in run ${run_id}:"
+                    foreach ($art in $allArtifacts.artifacts) {
+                      Write-Host "  - $($art.name)"
+                    }
+                    Write-Host "✗ CRITICAL ERROR: Expected artifact not found for dependency $dep" -ForegroundColor Red
+                    Write-Host "Expected artifacts matching pattern: build-outputs-$target_branch-[Release configs]" -ForegroundColor Red
+                  } else {
+                    Write-Host "✗ CRITICAL ERROR: Completed run $run_id has no artifacts for dependency $dep" -ForegroundColor Red
+                    Write-Host "This indicates the dependency build failed or did not produce expected outputs." -ForegroundColor Red
                   }
-                  
-                  Write-Host "✓ Successfully downloaded artifact for $dep for configuration $releaseConfig"
-                  $found = $true
+                  exit 1
+                }
+                
+                # If workflow is still running, continue waiting
+                if ($latestRun.status -eq "in_progress" -or $latestRun.status -eq "queued") {
+                  if ($waitAttempts -eq 0) {
+                    Write-Host "Run $run_id is still running, will check for artifacts while waiting..."
+                  }
+                  $waitAttempts++
+                } else {
+                  # Workflow completed but no artifacts found
                   break
                 }
               }
@@ -441,13 +455,11 @@ jobs:
                 $downloaded_artifacts += $dep
                 Write-Host "✓ Completed artifact downloads for $dep"
               } else {
-                Write-Host "Available artifacts in run ${run_id}:"
-                foreach ($art in $allArtifacts.artifacts) {
-                  Write-Host "  - $($art.name)"
+                if ($waitAttempts -gt $maxWaitAttempts) {
+                  Write-Host "✗ Run did not complete or produce artifacts after $maxWaitAttempts wait attempts - will need to build"
+                } else {
+                  Write-Host "✗ No suitable artifacts found for $dep - will need to build"
                 }
-                Write-Host "✗ CRITICAL ERROR: Expected artifact not found for dependency $dep" -ForegroundColor Red
-                Write-Host "Expected artifacts matching pattern: build-outputs-$target_branch-[Release configs]" -ForegroundColor Red
-                exit 1
               }
             }
           }
