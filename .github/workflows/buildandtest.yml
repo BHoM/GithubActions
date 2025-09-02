@@ -28,6 +28,10 @@ on:
         description: 'GitHub App Private Key (alternative to GH_TOKEN)'
         required: false
 
+concurrency:  # cancel in progress runs if this workflow is triggered again. Makes sure new commits cancel previous runs
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   prepare-dependencies:
     runs-on: windows-latest
