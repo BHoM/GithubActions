@@ -346,17 +346,17 @@ jobs:
               
               $runs = $runsResponse | ConvertFrom-Json
               $workflowRuns = $runs.workflow_runs | Where-Object { 
-                $_.head_branch -eq $target_branch -and $_.name -eq "BHoM Build Workflow"
+                $_.head_branch -eq $target_branch -and $_.name -eq "CI Build and Test"
               }
               
               if (-not $workflowRuns -or $workflowRuns.Count -eq 0) {
-                Write-Host "No BHoM Build Workflow runs found for $dep on $target_branch - will need to build"
+                Write-Host "No CI Build and Test workflow runs found for $dep on $target_branch - will need to build"
                 continue
               }
               
               $latestRun = $workflowRuns[0]
               $run_id = $latestRun.id
-              Write-Host "Found latest BHoM Build Workflow run: $run_id for $dep on $target_branch (status: $($latestRun.status), conclusion: $($latestRun.conclusion))"
+              Write-Host "Found latest CI Build and Test workflow run: $run_id for $dep on $target_branch (status: $($latestRun.status), conclusion: $($latestRun.conclusion))"
               
               # If the run is still in progress, wait for it to complete
               if ($latestRun.status -eq "in_progress" -or $latestRun.status -eq "queued") {
