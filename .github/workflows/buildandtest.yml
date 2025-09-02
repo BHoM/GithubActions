@@ -984,179 +984,107 @@ jobs:
 
       - name: Download Test Toolkit Tests
         run: |
-          Write-Host "Downloading Test Toolkit Tests from BHoM/TestRepo_A..."
+          Write-Host "Downloading Test Toolkit Tests from BHoM/Test_Toolkit..."
           
-          $targetRepo = "BHoM/TestRepo_A"
+          $targetRepo = "BHoM/Test_Toolkit"
           $branchName = '${{ inputs.branch_name }}'
           $artifactName = "Test_Toolkit_Tests"
           
-          Write-Host "Target branch: $branchName"
+          # Branch priority order
+          $branchesToTry = @(
+            $branchName,
+            "develop", 
+            "Test_Toolkit-InvestigateRunningAllChecksThroughNUnit"
+          )
           
-          # Determine which branch to use for the test repo (using same logic as dependency branches)
-          $testRepoBranch = "develop"  # Default fallback
+          Write-Host "Branch priority order: $($branchesToTry -join ', ')"
           
-          Write-Host "Checking branch availability for $targetRepo"
-          
-          try {
-            # First try to find the target branch
-            Write-Host "Looking for branch: '$branchName'"
-            $encodedBranch = [System.Web.HttpUtility]::UrlEncode($branchName)
-            Write-Host "URL encoded branch: '$encodedBranch'"
-            
-            # Check if branch exists using direct API call
-            $branchCheckResponse = gh api "/repos/$targetRepo/branches/$encodedBranch" 2>$null
-            if ($branchCheckResponse) {
-              $branchData = $branchCheckResponse | ConvertFrom-Json
-              if ($branchData.name) {
-                Write-Host "✓ Branch '$branchName' found via direct API"
-                $testRepoBranch = $branchName
-              }
-            } else {
-              # Fallback: Check using git ls-remote
-              Write-Host "Direct API failed, trying git ls-remote..."
-              $gitRemoteOutput = git ls-remote --heads "https://github.com/$targetRepo.git" 2>$null
-              if ($LASTEXITCODE -eq 0 -and $gitRemoteOutput) {
-                $branches = $gitRemoteOutput | ForEach-Object { 
-                  if ($_ -match "refs/heads/(.+)$") { 
-                    $matches[1] 
-                  } 
-                }
-                
-                if ($branches -contains $branchName) {
-                  Write-Host "✓ Branch '$branchName' found via git ls-remote"
-                  $testRepoBranch = $branchName
-                } else {
-                  Write-Host "→ Branch '$branchName' not found, using 'develop'"
-                }
-              } else {
-                Write-Host "→ Could not check branches, using 'develop'"
-              }
-            }
-          } catch {
-            Write-Host "→ Error checking branches: $($_.Exception.Message), using 'develop'"
-          }
-          
-          Write-Host "Using branch '$testRepoBranch' for test artifacts"
-          
-          # Now download artifacts from the determined branch
           $foundArtifact = $false
           
-          try {
-            Write-Host "Getting recent runs from branch '$testRepoBranch'..."
+          foreach ($testBranch in $branchesToTry) {
+            if ($foundArtifact) { break }
             
-            # Get recent runs from the branch (use fallback validation approach)
-            $runsResponse = gh api "/repos/$targetRepo/actions/runs?per_page=20" 2>$null
-            if ($runsResponse) {
-              $runs = $runsResponse | ConvertFrom-Json
-              $branchRuns = $runs.workflow_runs | Where-Object { $_.head_branch -eq $testRepoBranch }
-              
-              if ($branchRuns -and $branchRuns.Count -gt 0) {
-                Write-Host "Found $($branchRuns.Count) runs on branch '$testRepoBranch'"
+            Write-Host "Trying branch: $testBranch"
+            
+            try {
+              # Get recent successful runs from this branch
+              $runsResponse = gh api "/repos/$targetRepo/actions/runs?status=success&per_page=10" 2>$null
+              if ($runsResponse) {
+                $runs = $runsResponse | ConvertFrom-Json
+                $branchRuns = $runs.workflow_runs | Where-Object { $_.head_branch -eq $testBranch }
                 
-                foreach ($run in $branchRuns) {
-                  if ($foundArtifact) { break }
+                if ($branchRuns -and $branchRuns.Count -gt 0) {
+                  Write-Host "Found $($branchRuns.Count) successful runs on branch '$testBranch'"
                   
-                  Write-Host "Checking run $($run.id) (status: $($run.status), conclusion: $($run.conclusion))..."
+                  # Check the most recent run for artifacts
+                  $latestRun = $branchRuns[0]
+                  Write-Host "Checking latest run: $($latestRun.id)"
                   
-                  try {
-                    # Check artifacts for this run
-                    $artifactsResponse = gh api "/repos/$targetRepo/actions/runs/$($run.id)/artifacts" 2>$null
-                    if ($artifactsResponse) {
-                      $artifacts = $artifactsResponse | ConvertFrom-Json
-                      $targetArtifact = $artifacts.artifacts | Where-Object { $_.name -eq $artifactName }
+                  $artifactsResponse = gh api "/repos/$targetRepo/actions/runs/$($latestRun.id)/artifacts" 2>$null
+                  if ($artifactsResponse) {
+                    $artifacts = $artifactsResponse | ConvertFrom-Json
+                    $targetArtifact = $artifacts.artifacts | Where-Object { $_.name -eq $artifactName }
+                    
+                    if ($targetArtifact) {
+                      Write-Host "✓ Found artifact '$artifactName' in run $($latestRun.id) on branch '$testBranch'"
                       
-                      if ($targetArtifact) {
-                        Write-Host "✓ Found artifact '$artifactName' (ID: $($targetArtifact.id)) in run $($run.id)"
+                      # Download the artifact
+                      Write-Host "Downloading artifact..."
+                      gh api "/repos/$targetRepo/actions/artifacts/$($targetArtifact.id)/zip" > "$artifactName.zip"
+                      
+                      if (Test-Path "$artifactName.zip") {
+                        Write-Host "✓ Successfully downloaded $artifactName.zip"
                         
-                        # Download the artifact
-                        Write-Host "Downloading artifact..."
-                        gh api "/repos/$targetRepo/actions/artifacts/$($targetArtifact.id)/zip" > "$artifactName.zip"
-                        
-                        if (Test-Path "$artifactName.zip") {
-                          Write-Host "✓ Successfully downloaded $artifactName.zip"
-                          
-                          # Create _Tests_ directory
-                          if (Test-Path "_Tests_") {
-                            Write-Host "Removing existing _Tests_ folder..."
-                            Remove-Item "_Tests_" -Recurse -Force
-                          }
-                          New-Item -ItemType Directory -Force -Path "_Tests_" | Out-Null
-                          
-                          # Extract the artifact
-                          Write-Host "Extracting artifact to _Tests_ folder..."
-                          Expand-Archive "$artifactName.zip" -DestinationPath "_Tests_" -Force
-                          
-                          # Check if there's a nested zip file inside (from the packaging workflow)
-                          $nestedZip = Get-ChildItem "_Tests_" -Filter "Test_Toolkit_Tests.zip" -File
-                          if ($nestedZip) {
-                            Write-Host "Found nested zip file, extracting contents..."
-                            
-                            # Extract the nested zip directly to _Tests_ (not in a subfolder)
-                            $tempDir = "_Tests_\temp_extract"
-                            New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
-                            Expand-Archive $nestedZip.FullName -DestinationPath $tempDir -Force
-                            
-                            # Move contents from temp directory to _Tests_ root
-                            Get-ChildItem $tempDir -Recurse | ForEach-Object {
-                              $relativePath = $_.FullName.Replace("$tempDir\", "")
-                              $destPath = Join-Path "_Tests_" $relativePath
-                              
-                              if ($_.PSIsContainer) {
-                                if (-not (Test-Path $destPath)) {
-                                  New-Item -ItemType Directory -Force -Path $destPath | Out-Null
-                                }
-                              } else {
-                                $destDir = Split-Path $destPath -Parent
-                                if (-not (Test-Path $destDir)) {
-                                  New-Item -ItemType Directory -Force -Path $destDir | Out-Null
-                                }
-                                Copy-Item $_.FullName -Destination $destPath -Force
-                              }
-                            }
-                            
-                            # Clean up
-                            Remove-Item $tempDir -Recurse -Force
-                            Remove-Item $nestedZip.FullName -Force
-                          }
-                          
-                          # Clean up the downloaded zip
-                          Remove-Item "$artifactName.zip" -Force
-                          
-                          # Show what we extracted
-                          Write-Host "✓ Test artifacts extracted to _Tests_ folder:"
-                          $testFiles = Get-ChildItem "_Tests_" -Recurse -File | Select-Object -First 10
-                          foreach ($file in $testFiles) {
-                            $relativePath = $file.FullName.Replace("$((Get-Location).Path)\_Tests_\", "")
-                            Write-Host "  $relativePath"
-                          }
-                          if ((Get-ChildItem "_Tests_" -Recurse -File).Count -gt 10) {
-                            Write-Host "  ... and $((Get-ChildItem "_Tests_" -Recurse -File).Count - 10) more files"
-                          }
-                          
-                          $foundArtifact = $true
-                          break
-                        } else {
-                          Write-Host "⚠ Failed to download artifact"
+                        # Create _Tests_ directory
+                        if (Test-Path "_Tests_") {
+                          Write-Host "Removing existing _Tests_ folder..."
+                          Remove-Item "_Tests_" -Recurse -Force
                         }
+                        New-Item -ItemType Directory -Force -Path "_Tests_" | Out-Null
+                        
+                        # Extract the artifact
+                        Write-Host "Extracting artifact to _Tests_ folder..."
+                        Expand-Archive "$artifactName.zip" -DestinationPath "_Tests_" -Force
+                        
+                        # Clean up the downloaded zip
+                        Remove-Item "$artifactName.zip" -Force
+                        
+                        # Show what we extracted
+                        Write-Host "✓ Test artifacts extracted to _Tests_ folder:"
+                        $testFiles = Get-ChildItem "_Tests_" -Recurse -File | Select-Object -First 5
+                        foreach ($file in $testFiles) {
+                          $relativePath = $file.FullName.Replace("$((Get-Location).Path)\_Tests_\", "")
+                          Write-Host "  $relativePath"
+                        }
+                        if ((Get-ChildItem "_Tests_" -Recurse -File).Count -gt 5) {
+                          Write-Host "  ... and $((Get-ChildItem "_Tests_" -Recurse -File).Count - 5) more files"
+                        }
+                        
+                        $foundArtifact = $true
+                        break
+                      } else {
+                        Write-Host "⚠ Failed to download artifact from branch '$testBranch'"
                       }
+                    } else {
+                      Write-Host "→ No artifact '$artifactName' found in latest run on branch '$testBranch'"
                     }
-                  } catch {
-                    Write-Host "⚠ Error checking run $($run.id): $($_.Exception.Message)"
+                  } else {
+                    Write-Host "→ Could not get artifacts for latest run on branch '$testBranch'"
                   }
+                } else {
+                  Write-Host "→ No successful runs found on branch '$testBranch'"
                 }
               } else {
-                Write-Host "No runs found on branch '$testRepoBranch'"
+                Write-Host "→ Could not access runs for branch '$testBranch'"
               }
-            } else {
-              Write-Host "⚠ Could not get runs data from API"
+            } catch {
+              Write-Host "→ Error checking branch '$testBranch': $($_.Exception.Message)"
             }
-          } catch {
-            Write-Host "⚠ Error accessing runs: $($_.Exception.Message)"
           }
           
           if (-not $foundArtifact) {
-            Write-Host "✗ Could not find Test Toolkit Tests artifact" -ForegroundColor Red
-            Write-Host "Tried branch: $testRepoBranch"
+            Write-Host "✗ Could not find Test Toolkit Tests artifact from any branch" -ForegroundColor Red
+            Write-Host "Tried branches: $($branchesToTry -join ', ')"
             
             # Create empty _Tests_ folder so the workflow can continue
             if (-not (Test-Path "_Tests_")) {
