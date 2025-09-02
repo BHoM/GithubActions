@@ -357,31 +357,88 @@ jobs:
               $releaseConfigs = '${{ steps.discover-configs.outputs.release-configurations }}' | ConvertFrom-Json
               if ($releaseConfigs.Count -eq 0) { $releaseConfigs = @("Release") }
               
+              # First, list all available artifacts for debugging
+              Write-Host "Getting all artifacts for run $run_id..."
+              $allArtifactsResponse = gh api "/repos/$dep/actions/runs/$run_id/artifacts" 2>$null
+              if ($allArtifactsResponse) {
+                $allArtifacts = $allArtifactsResponse | ConvertFrom-Json
+                if ($allArtifacts.artifacts -and $allArtifacts.artifacts.Count -gt 0) {
+                  Write-Host "Available artifacts in this run:"
+                  foreach ($art in $allArtifacts.artifacts) {
+                    Write-Host "  - $($art.name)"
+                  }
+                } else {
+                  Write-Host "No artifacts found in this run"
+                }
+              }
+              
               $found = $false
               foreach ($releaseConfig in $releaseConfigs) {
-                $artifact_name = "build-outputs-$target_branch-$releaseConfig"
-                Write-Host "Looking for artifact: $artifact_name"
+                # Try different artifact name patterns to handle special characters in branch names
+                $artifactPatterns = @(
+                  "build-outputs-$target_branch-$releaseConfig",
+                  "build-outputs-$($target_branch.Replace('#', '%23'))-$releaseConfig",
+                  "build-outputs-$($target_branch.Replace('#', '_'))-$releaseConfig",
+                  "build-outputs-$($target_branch.Replace('#', '-'))-$releaseConfig"
+                )
                 
-                $artifacts = gh api "/repos/$dep/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == `"$artifact_name`")" 2>$null
-                if ($LASTEXITCODE -ne 0) { continue }
-                
-                $artifactData = $artifacts | ConvertFrom-Json -ErrorAction SilentlyContinue
-                if ($artifactData) {
-                  Write-Host "Downloading artifact: $artifact_name from $dep"
-                  $dep_safe = $dep.Replace('/', '_')
+                foreach ($artifact_name in $artifactPatterns) {
+                  Write-Host "Looking for artifact: $artifact_name"
                   
-                  # Download and extract
-                  gh api $artifactData.archive_download_url > "${dep_safe}_artifact.zip"
-                  New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
-                  Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
-                  
-                  # Copy to BHoM folder
-                  if (Test-Path "dependencies\$dep_safe") {
-                    Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
+                  # Try exact match first
+                  if ($allArtifacts.artifacts) {
+                    $targetArtifact = $allArtifacts.artifacts | Where-Object { $_.name -eq $artifact_name }
+                    if ($targetArtifact) {
+                      Write-Host "✓ Found exact match: $artifact_name from $dep"
+                      $dep_safe = $dep.Replace('/', '_')
+                      
+                      # Download and extract
+                      gh api "/repos/$dep/actions/artifacts/$($targetArtifact.id)/zip" > "${dep_safe}_artifact.zip"
+                      New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
+                      Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
+                      
+                      # Copy to BHoM folder
+                      if (Test-Path "dependencies\$dep_safe") {
+                        Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
+                      }
+                      
+                      Write-Host "✓ Successfully downloaded artifact for $dep for configuration $releaseConfig"
+                      $found = $true
+                      break
+                    }
                   }
+                }
+                
+                if ($found) { break }
+              }
+              
+              # If no exact match found, try pattern matching
+              if (-not $found -and $allArtifacts.artifacts) {
+                Write-Host "No exact matches found, trying pattern matching..."
+                foreach ($releaseConfig in $releaseConfigs) {
+                  $pattern = "build-outputs-.*-$releaseConfig"
+                  Write-Host "Looking for artifacts matching pattern: $pattern"
                   
-                  Write-Host "✓ Successfully downloaded artifact for $dep for configuration $releaseConfig"
-                  $found = $true
+                  $matchingArtifacts = $allArtifacts.artifacts | Where-Object { $_.name -match $pattern }
+                  if ($matchingArtifacts) {
+                    $targetArtifact = $matchingArtifacts[0] # Take the first match
+                    Write-Host "✓ Found pattern match: $($targetArtifact.name) from $dep"
+                    $dep_safe = $dep.Replace('/', '_')
+                    
+                    # Download and extract
+                    gh api "/repos/$dep/actions/artifacts/$($targetArtifact.id)/zip" > "${dep_safe}_artifact.zip"
+                    New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
+                    Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
+                    
+                    # Copy to BHoM folder
+                    if (Test-Path "dependencies\$dep_safe") {
+                      Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                    
+                    Write-Host "✓ Successfully downloaded artifact for $dep for configuration $releaseConfig"
+                    $found = $true
+                    break
+                  }
                 }
               }
               
