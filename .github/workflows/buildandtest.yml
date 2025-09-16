@@ -1328,7 +1328,7 @@ jobs:
             if ($testListExitCode -eq 0 -and $testListOutput) {
               # Filter out non-test lines and look for actual test methods
               $testLines = $testListOutput | Where-Object { 
-                $_ -and $_.Trim() -and 
+                $_ -is [string] -and $_ -and $_.Trim() -and 
                 $_ -notmatch "^Test run for" -and 
                 $_ -notmatch "^Microsoft \(R\)" -and 
                 $_ -notmatch "^Copyright \(c\)" -and
