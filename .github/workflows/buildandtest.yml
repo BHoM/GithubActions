@@ -956,7 +956,6 @@ jobs:
           compression-level: 6
 
       - name: Upload dependencies artifact
-        if: steps.build-summary.outputs.dependencies-built == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: Dependencies
@@ -990,7 +989,6 @@ jobs:
         shell: pwsh
 
       - name: Download dependencies
-        if: needs.prepare-dependencies.outputs.dependencies-built == 'true'
         uses: actions/download-artifact@v4
         with:
           name: Dependencies
