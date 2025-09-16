@@ -838,16 +838,66 @@ jobs:
                       if (Test-Path "$artifactName.zip") {
                         Write-Host "✓ Successfully downloaded $artifactName.zip"
                         
-                        # Create _Tests_ directory
-                        if (Test-Path "_Tests_") {
-                          Write-Host "Removing existing _Tests_ folder..."
-                          Remove-Item "_Tests_" -Recurse -Force
+                        # Create temporary extraction directory
+                        $tempExtractDir = "temp_extract"
+                        if (Test-Path $tempExtractDir) {
+                          Remove-Item $tempExtractDir -Recurse -Force
                         }
-                        New-Item -ItemType Directory -Force -Path "_Tests_" | Out-Null
+                        New-Item -ItemType Directory -Force -Path $tempExtractDir | Out-Null
                         
-                        # Extract the artifact
-                        Write-Host "Extracting artifact to _Tests_ folder..."
-                        Expand-Archive "$artifactName.zip" -DestinationPath "_Tests_" -Force
+                        # Extract the artifact to temporary directory first
+                        Write-Host "Extracting artifact to temporary directory..."
+                        Expand-Archive "$artifactName.zip" -DestinationPath $tempExtractDir -Force
+                        
+                        # Handle _Tests_ folder content
+                        if (Test-Path "$tempExtractDir\_Tests_") {
+                          Write-Host "Found _Tests_ folder in artifact, copying content to _Tests_ folder..."
+                          
+                          # Create/recreate _Tests_ directory
+                          if (Test-Path "_Tests_") {
+                            Write-Host "Removing existing _Tests_ folder..."
+                            Remove-Item "_Tests_" -Recurse -Force
+                          }
+                          New-Item -ItemType Directory -Force -Path "_Tests_" | Out-Null
+                          
+                          # Copy content from extracted _Tests_ folder
+                          $testsContent = Get-ChildItem "$tempExtractDir\_Tests_" -Recurse
+                          if ($testsContent.Count -gt 0) {
+                            Copy-Item "$tempExtractDir\_Tests_\*" -Destination "_Tests_" -Recurse -Force
+                            Write-Host "✓ Copied $($testsContent.Count) items from artifact _Tests_ folder"
+                          } else {
+                            Write-Host "Artifact _Tests_ folder is empty"
+                          }
+                        } else {
+                          Write-Host "No _Tests_ folder found in artifact - creating empty _Tests_ folder"
+                          if (Test-Path "_Tests_") {
+                            Remove-Item "_Tests_" -Recurse -Force
+                          }
+                          New-Item -ItemType Directory -Force -Path "_Tests_" | Out-Null
+                        }
+                        
+                        # Handle StartupHook folder content
+                        if (Test-Path "$tempExtractDir\StartupHook") {
+                          Write-Host "Found StartupHook folder in artifact, copying content to BHoM/Assemblies..."
+                          $startupHookContent = Get-ChildItem "$tempExtractDir\StartupHook" -Recurse -File
+                          
+                          if ($startupHookContent.Count -gt 0) {
+                            Write-Host "Found $($startupHookContent.Count) files in StartupHook folder:"
+                            foreach ($file in $startupHookContent) {
+                              $destinationPath = Join-Path "$env:BHoMFolder\Assemblies" $file.Name
+                              Copy-Item $file.FullName -Destination $destinationPath -Force
+                              Write-Host "  Copied: $($file.Name) to BHoM/Assemblies"
+                            }
+                            Write-Host "✓ Successfully copied $($startupHookContent.Count) StartupHook files to BHoM/Assemblies"
+                          } else {
+                            Write-Host "StartupHook folder is empty"
+                          }
+                        } else {
+                          Write-Host "No StartupHook folder found in artifact"
+                        }
+                        
+                        # Clean up temporary directory
+                        Remove-Item $tempExtractDir -Recurse -Force
                         
                         # Clean up the downloaded zip
                         Remove-Item "$artifactName.zip" -Force
@@ -1323,6 +1373,8 @@ jobs:
         shell: pwsh
 
       - name: Run individual tests
+        env:
+          DOTNET_STARTUP_HOOKS: ${{ env.BHoMFolder }}\Assemblies\TestStartupHook.dll
         run: |
           $testDlls = '${{ steps.identify-tests.outputs.test-dlls }}' | ConvertFrom-Json
           
