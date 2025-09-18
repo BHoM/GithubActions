@@ -1513,6 +1513,7 @@ jobs:
           list-tests: 'failed'
           list-suites: 'failed'
           badge-title: ${{ matrix.test-dll }}
+          use-actions-summary: 'false'
         env:
           GITHUB_TOKEN: ${{ github.token }}
   
