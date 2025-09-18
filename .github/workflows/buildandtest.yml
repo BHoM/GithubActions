@@ -164,13 +164,14 @@ jobs:
                 Write-Host "Develop commit: $developCommit"
                 
                 # Compare current branch (HEAD) with develop using two-dot syntax
-                Write-Host "Comparing current branch with develop branch..."
-                $changedFiles = git diff --name-only develop HEAD 2>&1
+                # Include all changes except deleted files (A=added, C=copied, M=modified, R=renamed, T=type changed)
+                Write-Host "Comparing current branch with develop branch (excluding deleted files only)..."
+                $changedFiles = git diff --name-only --diff-filter=ACMRT develop HEAD 2>&1
                 $gitDiffExitCode = $LASTEXITCODE
                 
                 Write-Host "Git diff exit code: $gitDiffExitCode"
                 if ($changedFiles) {
-                  Write-Host "Found $($changedFiles.Count) changed files"
+                  Write-Host "Found $($changedFiles.Count) changed files (excluding deletions)"
                   # Show first few files for debugging
                   $displayCount = [Math]::Min(5, $changedFiles.Count)
                   Write-Host "First $displayCount files:"
@@ -200,7 +201,7 @@ jobs:
                     
                     if ($fullPaths.Count -gt 0) {
                       $changedFilesString = $fullPaths -join ';'
-                      Write-Host "Changed files ($($fullPaths.Count)):"
+                      Write-Host "Changed files ($($fullPaths.Count)) - excluding deletions:"
                       foreach ($file in $fullPaths) {
                         Write-Host "  $file"
                       }
