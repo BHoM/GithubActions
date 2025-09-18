@@ -693,13 +693,72 @@ jobs:
               }
               
               foreach ($slnFile in $slnFiles) {
-                Write-Host "Building $($slnFile.Name) using build.ps1 with Release configuration..."
+                Write-Host "Building $($slnFile.Name) with Release configuration..."
                 
-                # Use the build.ps1 script which automatically detects SDK vs legacy builds
-                & "${{ github.workspace }}\.github\workflows\build.ps1" $slnFile.FullName "Release"
+                # Inline build logic (since we can't reference files from reusable workflow repo)
+                $buildSuccess = $false
                 
-                if ($LASTEXITCODE -eq 0) {
-                  Write-Host "✓ Successfully built $($slnFile.Name) with build.ps1" -ForegroundColor Green
+                # Detect project type and build accordingly
+                $projects = @()
+                if ($slnFile.Name.EndsWith(".sln")) {
+                  # Parse solution for projects
+                  $slnContent = Get-Content $slnFile.FullName
+                  $projects = $slnContent | Select-String 'Project\(".*"\)\s*=\s*".*?",\s*"(.*?)",\s*".*?"' | ForEach-Object {
+                    $rel = $_.Matches[0].Groups[1].Value
+                    if ($rel -and $rel.EndsWith(".csproj", [StringComparison]::OrdinalIgnoreCase)) {
+                      Join-Path (Split-Path $slnFile.FullName -Parent) $rel
+                    }
+                  } | Where-Object { Test-Path $_ }
+                }
+                
+                # Check if any project has packages.config (legacy)
+                $hasPackagesConfig = $false
+                if ($projects.Count -gt 0) {
+                  foreach ($proj in $projects) {
+                    $pkgConfig = Join-Path (Split-Path $proj -Parent) "packages.config"
+                    if (Test-Path $pkgConfig) {
+                      $hasPackagesConfig = $true
+                      break
+                    }
+                  }
+                }
+                
+                # Check if all projects are SDK-style
+                $allSdk = $true
+                if ($projects.Count -gt 0 -and -not $hasPackagesConfig) {
+                  foreach ($proj in $projects) {
+                    try {
+                      [xml]$xml = Get-Content -LiteralPath $proj
+                      if (-not ($xml.Project -and $xml.Project.Sdk)) {
+                        $allSdk = $false
+                        break
+                      }
+                    } catch {
+                      $allSdk = $false
+                      break
+                    }
+                  }
+                }
+                
+                # Build using appropriate method
+                if ($hasPackagesConfig -or -not $allSdk) {
+                  Write-Host "Detected legacy project - using NuGet + MSBuild"
+                  nuget restore $slnFile.FullName -NonInteractive
+                  if ($LASTEXITCODE -eq 0) {
+                    msbuild $slnFile.FullName /restore /m /p:Configuration=Release /p:Platform="Any CPU" /verbosity:minimal /nologo
+                    $buildSuccess = ($LASTEXITCODE -eq 0)
+                  }
+                } else {
+                  Write-Host "Detected SDK-style project - using dotnet"
+                  dotnet restore $slnFile.FullName
+                  if ($LASTEXITCODE -eq 0) {
+                    dotnet build $slnFile.FullName --configuration Release --no-restore --verbosity minimal
+                    $buildSuccess = ($LASTEXITCODE -eq 0)
+                  }
+                }
+                
+                if ($buildSuccess) {
+                  Write-Host "✓ Successfully built $($slnFile.Name)" -ForegroundColor Green
                 } else {
                   Write-Host "✗ Build failed for $($slnFile.Name)" -ForegroundColor Red
                   exit 1
@@ -1016,13 +1075,72 @@ jobs:
           }
           
           $sln_file = $sln_files[0]
-          Write-Host "Building solution: $($sln_file.Name) with configuration: ${{ matrix.build-configuration }}" -ForegroundColor Cyan
+          $configuration = "${{ matrix.build-configuration }}"
+          Write-Host "Building solution: $($sln_file.Name) with configuration: $configuration" -ForegroundColor Cyan
           
-          # Use the build.ps1 script with the matrix configuration
-          Write-Host "Using build.ps1 with configuration ${{ matrix.build-configuration }}..."
-          & "${{ github.workspace }}\.github\workflows\build.ps1" $sln_file.FullName "${{ matrix.build-configuration }}"
+          # Inline build logic (since we can't reference files from reusable workflow repo)
+          $buildSuccess = $false
           
-          if ($LASTEXITCODE -eq 0) {
+          # Detect project type and build accordingly
+          $projects = @()
+          if ($sln_file.Name.EndsWith(".sln")) {
+            # Parse solution for projects
+            $slnContent = Get-Content $sln_file.FullName
+            $projects = $slnContent | Select-String 'Project\(".*"\)\s*=\s*".*?",\s*"(.*?)",\s*".*?"' | ForEach-Object {
+              $rel = $_.Matches[0].Groups[1].Value
+              if ($rel -and $rel.EndsWith(".csproj", [StringComparison]::OrdinalIgnoreCase)) {
+                Join-Path (Split-Path $sln_file.FullName -Parent) $rel
+              }
+            } | Where-Object { Test-Path $_ }
+          }
+          
+          # Check if any project has packages.config (legacy)
+          $hasPackagesConfig = $false
+          if ($projects.Count -gt 0) {
+            foreach ($proj in $projects) {
+              $pkgConfig = Join-Path (Split-Path $proj -Parent) "packages.config"
+              if (Test-Path $pkgConfig) {
+                $hasPackagesConfig = $true
+                break
+              }
+            }
+          }
+          
+          # Check if all projects are SDK-style
+          $allSdk = $true
+          if ($projects.Count -gt 0 -and -not $hasPackagesConfig) {
+            foreach ($proj in $projects) {
+              try {
+                [xml]$xml = Get-Content -LiteralPath $proj
+                if (-not ($xml.Project -and $xml.Project.Sdk)) {
+                  $allSdk = $false
+                  break
+                }
+              } catch {
+                $allSdk = $false
+                break
+              }
+            }
+          }
+          
+          # Build using appropriate method
+          if ($hasPackagesConfig -or -not $allSdk) {
+            Write-Host "Detected legacy project - using NuGet + MSBuild"
+            nuget restore $sln_file.FullName -NonInteractive
+            if ($LASTEXITCODE -eq 0) {
+              msbuild $sln_file.FullName /restore /m /p:Configuration=$configuration /p:Platform="Any CPU" /verbosity:minimal /nologo
+              $buildSuccess = ($LASTEXITCODE -eq 0)
+            }
+          } else {
+            Write-Host "Detected SDK-style project - using dotnet"
+            dotnet restore $sln_file.FullName
+            if ($LASTEXITCODE -eq 0) {
+              dotnet build $sln_file.FullName --configuration $configuration --no-restore --verbosity minimal
+              $buildSuccess = ($LASTEXITCODE -eq 0)
+            }
+          }
+          
+          if ($buildSuccess) {
             Write-Host "✓ Build SUCCEEDED for $($sln_file.Name)" -ForegroundColor Green
           } else {
             Write-Host "✗ Build FAILED for $($sln_file.Name)" -ForegroundColor Red
