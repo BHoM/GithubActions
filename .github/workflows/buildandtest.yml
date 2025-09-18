@@ -684,57 +684,25 @@ jobs:
             Push-Location "Repositories\$repo_name"
             
             try {
-              # Find and restore packages for all .sln files
-              Get-ChildItem -Filter "*.sln" -File | ForEach-Object {
-                Write-Host "Restoring packages for $($_.Name)"
-                dotnet restore $_.Name 2>&1 | Tee-Object -Variable restoreOutput
-                Write-Host $restoreOutput
+              # Find .sln files and build using build.ps1
+              $slnFiles = Get-ChildItem -Filter "*.sln" -File
+              
+              if ($slnFiles.Count -eq 0) {
+                Write-Host "✗ No .sln file found in $repo_name" -ForegroundColor Red
+                exit 1
               }
               
-              # Get release configurations to build
-              $releaseConfigs = '${{ steps.discover-configs.outputs.release-configurations }}' | ConvertFrom-Json
-              
-              # If no release configs found, fallback to just "Release"
-              if ($releaseConfigs.Count -eq 0) {
-                Write-Host "No Release configurations discovered, falling back to 'Release'"
-                $releaseConfigs = @("Release")
-              }
-              
-              Write-Host "Building dependency $repo_name for configurations: $($releaseConfigs -join ', ')"
-              
-              # Build all .sln files in the repository for each Release configuration
-              Get-ChildItem -Filter "*.sln" -File | ForEach-Object {
-                $slnFile = $_
+              foreach ($slnFile in $slnFiles) {
+                Write-Host "Building $($slnFile.Name) using build.ps1 with Release configuration..."
                 
-                foreach ($config in $releaseConfigs) {
-                  Write-Host "Building $($slnFile.Name) with configuration $config using dotnet build"
-                  dotnet build $slnFile.Name --configuration $config --no-restore 2>&1 | Tee-Object -Variable buildOutput
-                  Write-Host $buildOutput
-                  
-                  if ($LASTEXITCODE -eq 0) {
-                    Write-Host "✓ Successfully built $($slnFile.Name) [$config] with dotnet build"
-                  } else {
-                    Write-Host "✗ dotnet build failed for $($slnFile.Name) [$config], trying MSBuild..." -ForegroundColor Yellow
-                    Write-Host "dotnet build errors:" -ForegroundColor Red
-                    Write-Host $buildOutput -ForegroundColor Red
-                    
-                    # Restore packages with MSBuild/NuGet
-                    Write-Host "Restoring packages with NuGet..."
-                    nuget restore $slnFile.Name
-                    
-                    # Try with MSBuild as fallback
-                    msbuild $slnFile.Name /p:Configuration=$config /p:Platform="Any CPU" /m 2>&1 | Tee-Object -Variable msbuildOutput
-                    Write-Host $msbuildOutput
-                    
-                    if ($LASTEXITCODE -eq 0) {
-                      Write-Host "✓ Successfully built $($slnFile.Name) [$config] with MSBuild"
-                    } else {
-                      Write-Host "✗ Both dotnet build and MSBuild failed for $($slnFile.Name) [$config]" -ForegroundColor Red
-                      Write-Host "MSBuild errors:" -ForegroundColor Red
-                      Write-Host $msbuildOutput -ForegroundColor Red
-                      exit 1
-                    }
-                  }
+                # Use the build.ps1 script which automatically detects SDK vs legacy builds
+                & "${{ github.workspace }}\.github\workflows\build.ps1" $slnFile.FullName "Release"
+                
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✓ Successfully built $($slnFile.Name) with build.ps1" -ForegroundColor Green
+                } else {
+                  Write-Host "✗ Build failed for $($slnFile.Name)" -ForegroundColor Red
+                  exit 1
                 }
               }
               
@@ -1048,67 +1016,17 @@ jobs:
           }
           
           $sln_file = $sln_files[0]
-          Write-Host "Building solution: $($sln_file.Name)" -ForegroundColor Cyan
+          Write-Host "Building solution: $($sln_file.Name) with configuration: ${{ matrix.build-configuration }}" -ForegroundColor Cyan
           
-          $solutionSuccess = $false
+          # Use the build.ps1 script with the matrix configuration
+          Write-Host "Using build.ps1 with configuration ${{ matrix.build-configuration }}..."
+          & "${{ github.workspace }}\.github\workflows\build.ps1" $sln_file.FullName "${{ matrix.build-configuration }}"
           
-          # Step 1: Try dotnet restore AND dotnet build
-          Write-Host "Attempting dotnet restore and build for $($sln_file.Name)..."
-          
-          dotnet restore $sln_file.Name 2>&1 | Tee-Object -Variable restoreOutput
-          Write-Host $restoreOutput
-          $dotnetRestoreSuccess = ($LASTEXITCODE -eq 0)
-          
-          $dotnetBuildSuccess = $false
-          
-          if ($dotnetRestoreSuccess) {
-            dotnet build $sln_file.Name --configuration ${{ matrix.build-configuration }} --no-restore 2>&1 | Tee-Object -Variable buildOutput
-            Write-Host $buildOutput
-            $dotnetBuildSuccess = ($LASTEXITCODE -eq 0)
-          }
-          
-          # Step 2: If either dotnet restore OR dotnet build failed, try MSBuild approach
-          if ($dotnetRestoreSuccess -and $dotnetBuildSuccess) {
-            Write-Host "✓ Successfully restored and built $($sln_file.Name) with dotnet" -ForegroundColor Green
-            $solutionSuccess = $true
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "✓ Build SUCCEEDED for $($sln_file.Name)" -ForegroundColor Green
           } else {
-            Write-Host "✗ dotnet approach failed for $($sln_file.Name), trying MSBuild approach..." -ForegroundColor Yellow
-            
-            if (-not $dotnetRestoreSuccess) {
-              Write-Host "dotnet restore errors:" -ForegroundColor Red
-              Write-Host $restoreOutput -ForegroundColor Red
-            }
-            if (-not $dotnetBuildSuccess -and $dotnetRestoreSuccess) {
-              Write-Host "dotnet build errors:" -ForegroundColor Red
-              Write-Host $buildOutput -ForegroundColor Red
-            }
-            
-            # Try NuGet restore and MSBuild
-            Write-Host "Restoring packages with NuGet..."
-            nuget restore $sln_file.Name 2>&1 | Tee-Object -Variable nugetOutput
-            Write-Host $nugetOutput
-            
-            Write-Host "Building with MSBuild..."
-            msbuild $sln_file.Name /p:Configuration=${{ matrix.build-configuration }} /p:Platform="Any CPU" /m 2>&1 | Tee-Object -Variable msbuildOutput
-            Write-Host $msbuildOutput
-            
-            if ($LASTEXITCODE -eq 0) {
-              Write-Host "✓ Successfully restored and built $($sln_file.Name) with MSBuild" -ForegroundColor Green
-              $solutionSuccess = $true
-            } else {
-              Write-Host "✗ Both dotnet and MSBuild approaches failed for $($sln_file.Name)" -ForegroundColor Red
-              Write-Host "MSBuild errors:" -ForegroundColor Red
-              Write-Host $msbuildOutput -ForegroundColor Red
-              $solutionSuccess = $false
-            }
-          }
-          
-          # Exit with error if build failed
-          if (-not $solutionSuccess) {
             Write-Host "✗ Build FAILED for $($sln_file.Name)" -ForegroundColor Red
             exit 1
-          } else {
-            Write-Host "✓ Build SUCCEEDED for $($sln_file.Name)" -ForegroundColor Green
           }
         shell: pwsh
 
