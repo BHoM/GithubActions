@@ -1509,8 +1509,10 @@ jobs:
         with:
           name: Test Results - ${{ matrix.test-dll }}
           path: test-results/**/test-results-${{ matrix.test-dll }}.trx
-          reporter: dotnet-trx
+          reporter: dotnet-nunit
           list-tests: 'failed'
+          list-suites: 'failed'
+          badge-title: ${{ matrix.test-dll }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
   
