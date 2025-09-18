@@ -1502,7 +1502,7 @@ jobs:
           name: Test Results - ${{ matrix.test-dll }}
           path: test-results/**/test-results-${{ matrix.test-dll }}.trx
           reporter: dotnet-trx
-          list-tests: 'failed'
+          list-tests: 'all'
           list-suites: 'failed'
           badge-title: ${{ matrix.test-dll }}
           use-actions-summary: 'false'
