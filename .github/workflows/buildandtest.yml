@@ -1214,7 +1214,8 @@ jobs:
           if (Test-Path "bhom-temp") {
             Write-Host "Contents of bhom-temp directory:"
             Get-ChildItem "bhom-temp" -Recurse | ForEach-Object {
-              Write-Host "  $($_.FullName.Replace((Get-Location).Path + '\bhom-temp\', ''))"
+              $currentPathWithTemp = (Get-Location).Path + '\bhom-temp\'
+              Write-Host "  $($_.FullName.Replace($currentPathWithTemp, ''))"
             }
           } else {
             Write-Host "ERROR: bhom-temp directory not found!" -ForegroundColor Red
@@ -1227,9 +1228,10 @@ jobs:
               Write-Host "Merging from configuration: $config" -ForegroundColor Cyan
               
               # Show source structure
-              Write-Host "Source structure for $config:"
+              Write-Host "Source structure for ${config}:"
               Get-ChildItem $sourcePath -Recurse | ForEach-Object {
-                Write-Host "  $($_.FullName.Replace($sourcePath + '\', ''))"
+                $sourcePathWithSlash = $sourcePath + '\'
+                Write-Host "  $($_.FullName.Replace($sourcePathWithSlash, ''))"
               }
               
               # Copy all files from this configuration, with newer files taking precedence
@@ -1292,7 +1294,8 @@ jobs:
             # Show overall BHoM folder structure
             Write-Host "`nOverall BHoM folder structure:"
             Get-ChildItem $env:BHoMFolder -Recurse | ForEach-Object {
-              $relativePath = $_.FullName.Replace($env:BHoMFolder + '\', '')
+              $bhomFolderWithSlash = $env:BHoMFolder + '\'
+              $relativePath = $_.FullName.Replace($bhomFolderWithSlash, '')
               if ($_.PSIsContainer) {
                 Write-Host "  📁 $relativePath"
               } else {
@@ -1464,7 +1467,8 @@ jobs:
                         Write-Host "✓ Test artifacts extracted to _Tests_ folder:"
                         $testFiles = Get-ChildItem "_Tests_" -Recurse -File | Select-Object -First 5
                         foreach ($file in $testFiles) {
-                          $relativePath = $file.FullName.Replace("$((Get-Location).Path)\_Tests_\", "")
+                          $testsPath = (Get-Location).Path + '\_Tests_\'
+                          $relativePath = $file.FullName.Replace($testsPath, "")
                           Write-Host "  $relativePath"
                         }
                         if ((Get-ChildItem "_Tests_" -Recurse -File).Count -gt 5) {
