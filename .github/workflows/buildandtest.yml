@@ -1098,6 +1098,7 @@ jobs:
           compression-level: 6
 
       - name: Upload BHoM Assemblies
+        if: contains(fromJson(needs.prepare-dependencies.outputs.release-configurations), matrix.build-configuration)
         uses: actions/upload-artifact@v4
         with:
           name: bhom-assemblies-${{ matrix.build-configuration }}
@@ -1137,136 +1138,15 @@ jobs:
         shell: pwsh
 
       - name: Download and merge BHoM Assemblies from all release builds
-        run: |
-          $releaseConfigs = '${{ needs.prepare-dependencies.outputs.release-configurations }}' | ConvertFrom-Json
-          Write-Host "Downloading and merging BHoM assemblies from release configurations: $($releaseConfigs -join ', ')"
-          
-          foreach ($config in $releaseConfigs) {
-            Write-Host "Processing configuration: $config" -ForegroundColor Cyan
-            try {
-              # Download each release configuration to a temporary folder
-              $tempDir = "temp-$config"
-              New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
-              
-              # Note: We'll use actions/download-artifact multiple times
-              Write-Host "Downloading bhom-assemblies-$config..."
-              # This will be handled by separate download steps below
-              
-            } catch {
-              Write-Host "Warning: Could not process configuration $config - $($_.Exception.Message)" -ForegroundColor Yellow
-            }
-          }
-        shell: pwsh
-
-      - name: Download BHoM Assemblies for each release configuration
         uses: actions/download-artifact@v4
         with:
           pattern: bhom-assemblies-*
-          path: bhom-temp
-          merge-multiple: false
-
-      - name: Debug Downloaded Artifacts
-        run: |
-          Write-Host "Checking what BHoM assembly artifacts were downloaded..."
-          
-          if (Test-Path "bhom-temp") {
-            Write-Host "bhom-temp directory exists, contents:"
-            $artifacts = Get-ChildItem "bhom-temp" -Directory
-            
-            if ($artifacts.Count -eq 0) {
-              Write-Host "ERROR: No artifact directories found in bhom-temp!" -ForegroundColor Red
-              Write-Host "This suggests no bhom-assemblies-* artifacts were available to download."
-              
-              # List what's actually in the temp directory
-              Write-Host "Contents of bhom-temp:"
-              Get-ChildItem "bhom-temp" -Recurse | ForEach-Object {
-                Write-Host "  $($_.FullName)"
-              }
-              exit 1
-            }
-            
-            foreach ($artifact in $artifacts) {
-              Write-Host "Artifact: $($artifact.Name)" -ForegroundColor Cyan
-              $files = Get-ChildItem $artifact.FullName -Recurse -File
-              Write-Host "  Contains $($files.Count) files:"
-              foreach ($file in $files | Select-Object -First 10) {
-                $fileSize = [math]::Round($file.Length / 1KB, 2)
-                Write-Host "    $($file.Name) ($fileSize KB)"
-              }
-              if ($files.Count -gt 10) {
-                Write-Host "    ... and $($files.Count - 10) more files"
-              }
-            }
-          } else {
-            Write-Host "ERROR: bhom-temp directory does not exist!" -ForegroundColor Red
-            exit 1
-          }
-        shell: pwsh
-
-      - name: Merge BHoM Assemblies
-        run: |
-          Write-Host "Merging BHoM assemblies from all release configurations..."
-          $releaseConfigs = '${{ needs.prepare-dependencies.outputs.release-configurations }}' | ConvertFrom-Json
-          
-          Write-Host "Release configurations to merge: $($releaseConfigs -join ', ')"
-          
-          # Check what was actually downloaded
-          if (Test-Path "bhom-temp") {
-            Write-Host "Contents of bhom-temp directory:"
-            Get-ChildItem "bhom-temp" -Recurse | ForEach-Object {
-              $currentPathWithTemp = (Get-Location).Path + '\bhom-temp\'
-              Write-Host "  $($_.FullName.Replace($currentPathWithTemp, ''))"
-            }
-          } else {
-            Write-Host "ERROR: bhom-temp directory not found!" -ForegroundColor Red
-            exit 1
-          }
-          
-          foreach ($config in $releaseConfigs) {
-            $sourcePath = "bhom-temp\bhom-assemblies-$config"
-            if (Test-Path $sourcePath) {
-              Write-Host "Merging from configuration: $config" -ForegroundColor Cyan
-              
-              # Show source structure
-              Write-Host "Source structure for ${config}:"
-              Get-ChildItem $sourcePath -Recurse | ForEach-Object {
-                $sourcePathWithSlash = $sourcePath + '\'
-                Write-Host "  $($_.FullName.Replace($sourcePathWithSlash, ''))"
-              }
-              
-              # Copy all files from this configuration, with newer files taking precedence
-              $sourceFiles = Get-ChildItem $sourcePath -Recurse -File
-              foreach ($file in $sourceFiles) {
-                # Calculate relative path more safely
-                $sourcePathNormalized = $sourcePath.TrimEnd('\')
-                $relativePath = $file.FullName.Substring($sourcePathNormalized.Length + 1)
-                $destinationPath = Join-Path $env:BHoMFolder $relativePath
-                $destinationDir = Split-Path $destinationPath -Parent
-                
-                # Ensure destination directory exists
-                if (-not (Test-Path $destinationDir)) {
-                  New-Item -ItemType Directory -Force -Path $destinationDir | Out-Null
-                }
-                
-                # Copy file, with overwrite (later configs take precedence)
-                Copy-Item $file.FullName -Destination $destinationPath -Force
-                Write-Host "  Copied: $relativePath to $destinationPath"
-              }
-              Write-Host "✓ Merged $($sourceFiles.Count) files from $config"
-            } else {
-              Write-Host "⚠ Configuration $config not found in downloaded artifacts" -ForegroundColor Yellow
-            }
-          }
-          
-          # Clean up temporary directory
-          Remove-Item "bhom-temp" -Recurse -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "✓ BHoM assemblies merge completed"
-        shell: pwsh
+          path: ${{ env.BHoMFolder }}
+          merge-multiple: true
 
       - name: Verify BHoM Assemblies Location
         run: |
-          Write-Host "Verifying BHoM assemblies are in the correct location..."
+          Write-Host "Verifying BHoM assemblies after simple merge..."
           
           if (Test-Path $env:BHoMFolder) {
             Write-Host "BHoM folder exists at: $env:BHoMFolder"
@@ -1280,9 +1160,12 @@ jobs:
               $dllFiles = Get-ChildItem $assembliesPath -Filter "*.dll" -File -ErrorAction SilentlyContinue
               if ($dllFiles.Count -gt 0) {
                 Write-Host "Found $($dllFiles.Count) DLL files in Assemblies folder:"
-                foreach ($dll in $dllFiles | Sort-Object Name) {
+                foreach ($dll in $dllFiles | Sort-Object Name | Select-Object -First 10) {
                   $fileSize = [math]::Round($dll.Length / 1KB, 2)
                   Write-Host "  $($dll.Name) ($fileSize KB)"
+                }
+                if ($dllFiles.Count -gt 10) {
+                  Write-Host "  ... and $($dllFiles.Count - 10) more DLL files"
                 }
               } else {
                 Write-Host "WARNING: No DLL files found in Assemblies folder!" -ForegroundColor Yellow
@@ -1291,16 +1174,15 @@ jobs:
               Write-Host "ERROR: Assemblies folder not found at $assembliesPath!" -ForegroundColor Red
             }
             
-            # Show overall BHoM folder structure
-            Write-Host "`nOverall BHoM folder structure:"
-            Get-ChildItem $env:BHoMFolder -Recurse | ForEach-Object {
-              $bhomFolderWithSlash = $env:BHoMFolder + '\'
-              $relativePath = $_.FullName.Replace($bhomFolderWithSlash, '')
+            # Show top-level BHoM folder contents only
+            Write-Host "`nBHoM folder top-level contents:"
+            Get-ChildItem $env:BHoMFolder | ForEach-Object {
               if ($_.PSIsContainer) {
-                Write-Host "  📁 $relativePath"
+                $fileCount = (Get-ChildItem $_.FullName -Recurse -File -ErrorAction SilentlyContinue).Count
+                Write-Host "  📁 $($_.Name) ($fileCount files)"
               } else {
                 $fileSize = [math]::Round($_.Length / 1KB, 2)
-                Write-Host "  📄 $relativePath ($fileSize KB)"
+                Write-Host "  📄 $($_.Name) ($fileSize KB)"
               }
             }
           } else {
