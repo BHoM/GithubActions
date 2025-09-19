@@ -401,28 +401,28 @@ jobs:
                     Write-Host "Run has $($allArtifacts.artifacts.Count) artifacts available"
                     
                     # Look for the specific artifacts we need
-                    foreach ($releaseConfig in $releaseConfigs) {
-                      $artifact_name = "build-outputs-$target_branch-$releaseConfig"
-                      Write-Host "Looking for artifact: $artifact_name"
-                      
+              foreach ($releaseConfig in $releaseConfigs) {
+                $artifact_name = "build-outputs-$target_branch-$releaseConfig"
+                Write-Host "Looking for artifact: $artifact_name"
+                
                       $targetArtifact = $allArtifacts.artifacts | Where-Object { $_.name -eq $artifact_name }
-                      
+                
                       if ($targetArtifact) {
                         Write-Host "✓ Found artifact: $artifact_name from $dep"
-                        $dep_safe = $dep.Replace('/', '_')
-                        
-                        # Download and extract
+                  $dep_safe = $dep.Replace('/', '_')
+                  
+                  # Download and extract
                         gh api "/repos/$dep/actions/artifacts/$($targetArtifact.id)/zip" > "${dep_safe}_artifact.zip"
-                        New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
-                        Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
-                        
-                        # Copy to BHoM folder
-                        if (Test-Path "dependencies\$dep_safe") {
-                          Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
-                        }
-                        
-                        Write-Host "✓ Successfully downloaded artifact for $dep for configuration $releaseConfig"
-                        $found = $true
+                  New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
+                  Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
+                  
+                  # Copy to BHoM folder
+                  if (Test-Path "dependencies\$dep_safe") {
+                    Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
+                  }
+                  
+                  Write-Host "✓ Successfully downloaded artifact for $dep for configuration $releaseConfig"
+                  $found = $true
                         break
                       }
                     }
@@ -754,10 +754,10 @@ jobs:
                     msbuild $slnFile.FullName /restore /m /p:Configuration=Release /p:Platform="Any CPU" /verbosity:minimal /nologo
                     $buildSuccess = ($LASTEXITCODE -eq 0)
                   }
-                } else {
+                  } else {
                   Write-Host "Detected SDK-style project - using dotnet"
                   dotnet restore $slnFile.FullName
-                  if ($LASTEXITCODE -eq 0) {
+                    if ($LASTEXITCODE -eq 0) {
                     dotnet build $slnFile.FullName --configuration Release --no-restore --verbosity minimal
                     $buildSuccess = ($LASTEXITCODE -eq 0)
                   }
@@ -765,9 +765,9 @@ jobs:
                 
                 if ($buildSuccess) {
                   Write-Host "✓ Successfully built $($slnFile.Name)" -ForegroundColor Green
-                } else {
+                    } else {
                   Write-Host "✗ Build failed for $($slnFile.Name)" -ForegroundColor Red
-                  exit 1
+                      exit 1
                 }
               }
               
@@ -1145,6 +1145,14 @@ jobs:
           echo "test-dll-names=$testDllNamesJson" >> $env:GITHUB_OUTPUT
         shell: pwsh
 
+      - name: Upload startup-hook artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: startup-hook
+          path: ${{ env.BHoMFolder }}
+          retention-days: 1
+          compression-level: 6
+
   build:
     runs-on: windows-latest
     needs: prepare-dependencies
@@ -1285,7 +1293,7 @@ jobs:
               msbuild $sln_file.FullName /restore /m /p:Configuration=$configuration /p:Platform="Any CPU" /verbosity:minimal /nologo
               $buildSuccess = ($LASTEXITCODE -eq 0)
             }
-          } else {
+            } else {
             Write-Host "Detected SDK-style project - using dotnet"
             dotnet restore $sln_file.FullName
             if ($LASTEXITCODE -eq 0) {
@@ -1449,6 +1457,43 @@ jobs:
         with:
           name: Test-Toolkit-Tests
           path: _Tests_
+
+      - name: Download startup-hook artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: startup-hook
+          path: startup-hook-temp
+
+      - name: Copy startup-hook files
+        run: |
+          Write-Host "Copying startup-hook files to BHoM folder..."
+          if (Test-Path "startup-hook-temp/Assemblies") {
+            $startupHookFiles = Get-ChildItem "startup-hook-temp/Assemblies" -File -Recurse
+            if ($startupHookFiles.Count -gt 0) {
+              Write-Host "Found $($startupHookFiles.Count) startup-hook files:"
+              foreach ($file in $startupHookFiles) {
+                $destinationPath = Join-Path "$env:BHoMFolder\Assemblies" $file.Name
+                # Only copy if the file doesn't already exist (to avoid overriding build assemblies)
+                if (-not (Test-Path $destinationPath)) {
+                  Copy-Item $file.FullName -Destination $destinationPath -Force
+                  Write-Host "  Copied: $($file.Name)"
+                  } else {
+                  Write-Host "  Skipped: $($file.Name) (already exists)"
+                  }
+                }
+              Write-Host "✓ Startup-hook files processed"
+              } else {
+              Write-Host "No files found in startup-hook-temp/Assemblies"
+            }
+                } else {
+            Write-Host "No Assemblies folder found in startup-hook artifact"
+          }
+          
+          # Clean up temporary directory
+          if (Test-Path "startup-hook-temp") {
+            Remove-Item "startup-hook-temp" -Recurse -Force
+          }
+        shell: pwsh
 
       - name: Run individual tests
         env:
