@@ -830,14 +830,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: |
-            6.0.x
-            8.0.x
-            9.0.x
-
       - name: Check GitHub App secrets
         id: check-app-secrets
         run: |
@@ -1119,35 +1111,12 @@ jobs:
               continue
             }
             
-            # Now check for actual tests using dotnet test
-            Write-Host "  - Checking for actual tests..." -ForegroundColor Cyan
-            $testListOutput = & dotnet test "$($dll.FullName)" --list-tests --verbosity quiet 2>&1
-            $testListExitCode = $LASTEXITCODE
-            
-            if ($testListExitCode -eq 0 -and $testListOutput) {
-              # Filter out non-test lines and look for actual test methods
-              $testLines = $testListOutput | Where-Object { 
-                $_ -is [string] -and $_ -and $_.Trim() -and 
-                $_ -notmatch "^Test run for" -and 
-                $_ -notmatch "^Microsoft \(R\)" -and 
-                $_ -notmatch "^Copyright \(c\)" -and
-                $_ -notmatch "^\s*$" -and
-                $_ -match "^\s*\w" 
-              }
-              
-              if ($testLines -and $testLines.Count -gt 0) {
-                $testCount = $testLines.Count
-                Write-Host "✓ Found $testCount NUnit tests in $($dll.Name)" -ForegroundColor Green
-                $testDlls += @{
-                  Name = $dll.BaseName
-                  FullPath = $dll.FullName
-                  TestCount = $testCount
-                }
-              } else {
-                Write-Host "  - No test methods found in $($dll.Name)" -ForegroundColor Yellow
-              }
-            } else {
-              Write-Host "  - Cannot run tests on $($dll.Name) (exit code: $testListExitCode)" -ForegroundColor Yellow
+            # If we found NUnit reference, assume it contains tests
+            Write-Host "✓ Found NUnit reference in $($dll.Name) - assuming it contains tests" -ForegroundColor Green
+            $testDlls += @{
+              Name = $dll.BaseName
+              FullPath = $dll.FullName
+              TestCount = "unknown" # We can't determine exact count without dotnet CLI
             }
           }
           
@@ -1158,7 +1127,7 @@ jobs:
           
           Write-Host "✓ Identified $($testDlls.Count) test DLL(s):"
           foreach ($testDll in $testDlls) {
-            Write-Host "  - $($testDll.Name) ($($testDll.TestCount) tests)"
+            Write-Host "  - $($testDll.Name) (contains NUnit tests)"
           }
           
           # Convert to JSON for output
