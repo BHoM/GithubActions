@@ -811,6 +811,56 @@ jobs:
           }
         shell: pwsh
 
+      - name: Upload dependencies artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dependencies
+          path: ${{ env.BHoMFolder }}
+          retention-days: 3
+          compression-level: 6
+
+  setup-test:
+    runs-on: ubuntu-latest
+    outputs:
+      test-dll-names: ${{ steps.identify-tests.outputs.test-dll-names }}
+    env:
+      BHoMFolder: "/tmp/BHoM"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            6.0.x
+            8.0.x
+            9.0.x
+
+      - name: Check GitHub App secrets
+        id: check-app-secrets
+        run: |
+          if [ -n "${{ vars.GH_BOT_APP_ID }}" ] && [ -n "${{ secrets.GH_BOT_PRIVATE_KEY }}" ]; then
+            echo "app-secrets-available=true" >> $GITHUB_OUTPUT
+          else
+            echo "app-secrets-available=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Generate GitHub App Token
+        id: generate-token
+        if: steps.check-app-secrets.outputs.app-secrets-available == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.GH_BOT_APP_ID }}
+          private-key: ${{ secrets.GH_BOT_PRIVATE_KEY }}
+
+      - name: Create BHoM directory
+        run: |
+          mkdir -p "${{ env.BHoMFolder }}/Assemblies"
+          echo "BHoM directory created at: ${{ env.BHoMFolder }}"
+        shell: bash
+
       - name: Download Test Toolkit Tests
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.GH_TOKEN || github.token }}
@@ -912,7 +962,7 @@ jobs:
                           if ($startupHookContent.Count -gt 0) {
                             Write-Host "Found $($startupHookContent.Count) files in StartupHook folder:"
                             foreach ($file in $startupHookContent) {
-                              $destinationPath = Join-Path "$env:BHoMFolder\Assemblies" $file.Name
+                              $destinationPath = Join-Path "$env:BHoMFolder/Assemblies" $file.Name
                               Copy-Item $file.FullName -Destination $destinationPath -Force
                               Write-Host "  Copied: $($file.Name) to BHoM/Assemblies"
                             }
@@ -934,7 +984,7 @@ jobs:
                         Write-Host "✓ Test artifacts extracted to _Tests_ folder:"
                         $testFiles = Get-ChildItem "_Tests_" -Recurse -File | Select-Object -First 5
                         foreach ($file in $testFiles) {
-                          $relativePath = $file.FullName.Replace("$((Get-Location).Path)\_Tests_\", "")
+                          $relativePath = $file.FullName.Replace("$((Get-Location).Path)/_Tests_/", "")
                           Write-Host "  $relativePath"
                         }
                         if ((Get-ChildItem "_Tests_" -Recurse -File).Count -gt 5) {
@@ -983,19 +1033,146 @@ jobs:
           retention-days: 3
           compression-level: 6
 
-      - name: Upload dependencies artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Dependencies
-          path: ${{ env.BHoMFolder }}
-          retention-days: 3
-          compression-level: 6
+      - name: Identify tests
+        id: identify-tests
+        run: |
+          Write-Host "Searching for test DLLs in _Tests_ folder..."
+          
+          if (-not (Test-Path "_Tests_")) {
+            Write-Host "✗ _Tests_ folder not found" -ForegroundColor Red
+            exit 1
+          }
+          
+          # Find all DLL files in _Tests_ folder that contain unit tests
+          $testDlls = @()
+          $allDlls = Get-ChildItem "_Tests_" -Filter "*.dll" -File -Recurse
+          
+          if ($allDlls.Count -eq 0) {
+            Write-Host "✗ No DLL files found in _Tests_ folder" -ForegroundColor Red
+            exit 1
+          }
+          
+          Write-Host "Found $($allDlls.Count) DLL files, pre-filtering for NUnit references..."
+          
+          foreach ($dll in $allDlls) {
+            Write-Host "Checking: $($dll.Name)"
+            
+            # Skip known non-test DLLs
+            $dllBaseName = $dll.BaseName
+            if ($dllBaseName -eq "NUnit_Engine" -or $dllBaseName -eq "TestSetup_Engine" -or 
+                $dllBaseName -eq "testhost" -or $dllBaseName -eq "testcentric.engine.metadata" -or
+                $dllBaseName.StartsWith("System.") -or $dllBaseName.StartsWith("Microsoft.") -or
+                $dllBaseName.StartsWith("nunit.", [System.StringComparison]::OrdinalIgnoreCase) -or
+                $dllBaseName.StartsWith("NUnit3.") -or
+                $dllBaseName.StartsWith("Newtonsoft.") -or $dllBaseName.StartsWith("NuGet.") -or
+                $dllBaseName.EndsWith("_oM") -or $dllBaseName.EndsWith("_Engine")) {
+              Write-Host "  - Skipping known non-test DLL: $($dll.Name)" -ForegroundColor Gray
+              continue
+            }
+            
+            # Pre-filter: Check if DLL references nunit.framework.dll using ildasm or alternative methods
+            $hasNUnitReference = $false
+            
+            try {
+              # Method 1: Try using System.Reflection.MetadataLoadContext (more modern approach)
+              Add-Type -AssemblyName System.Reflection.MetadataLoadContext -ErrorAction SilentlyContinue
+              if ([System.Reflection.MetadataLoadContext] -ne $null) {
+                $resolver = [System.Reflection.PathAssemblyResolver]::new(@($dll.Directory.FullName, [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()))
+                $mlc = [System.Reflection.MetadataLoadContext]::new($resolver)
+                try {
+                  $assembly = $mlc.LoadFromAssemblyPath($dll.FullName)
+                  $referencedAssemblies = $assembly.GetReferencedAssemblies()
+                  $hasNUnitReference = $referencedAssemblies | Where-Object { $_.Name -eq "nunit.framework" }
+                  if ($hasNUnitReference) {
+                    Write-Host "  ✓ NUnit framework reference found" -ForegroundColor Cyan
+                  } else {
+                    Write-Host "  - No NUnit framework reference found, skipping" -ForegroundColor Gray
+                  }
+                } finally {
+                  $mlc.Dispose()
+                }
+              } else {
+                throw "MetadataLoadContext not available"
+              }
+            } catch {
+              # Method 2: Fallback to checking file dependencies using PowerShell and .NET reflection
+              try {
+                # Load assembly in a separate AppDomain context to avoid locking
+                $assemblyBytes = [System.IO.File]::ReadAllBytes($dll.FullName)
+                $assembly = [System.Reflection.Assembly]::Load($assemblyBytes)
+                $referencedAssemblies = $assembly.GetReferencedAssemblies()
+                $hasNUnitReference = $referencedAssemblies | Where-Object { $_.Name -eq "nunit.framework" }
+                if ($hasNUnitReference) {
+                  Write-Host "  ✓ NUnit framework reference found (via fallback method)" -ForegroundColor Cyan
+                } else {
+                  Write-Host "  - No NUnit framework reference found, skipping" -ForegroundColor Gray
+                }
+              } catch {
+                Write-Host "  - Could not determine NUnit reference for $($dll.Name), skipping" -ForegroundColor Yellow
+                $hasNUnitReference = $false
+              }
+            }
+            
+            # Skip if no NUnit reference found
+            if (-not $hasNUnitReference) {
+              continue
+            }
+            
+            # Now check for actual tests using dotnet test
+            Write-Host "  - Checking for actual tests..." -ForegroundColor Cyan
+            $testListOutput = & dotnet test "$($dll.FullName)" --list-tests --verbosity quiet 2>&1
+            $testListExitCode = $LASTEXITCODE
+            
+            if ($testListExitCode -eq 0 -and $testListOutput) {
+              # Filter out non-test lines and look for actual test methods
+              $testLines = $testListOutput | Where-Object { 
+                $_ -is [string] -and $_ -and $_.Trim() -and 
+                $_ -notmatch "^Test run for" -and 
+                $_ -notmatch "^Microsoft \(R\)" -and 
+                $_ -notmatch "^Copyright \(c\)" -and
+                $_ -notmatch "^\s*$" -and
+                $_ -match "^\s*\w" 
+              }
+              
+              if ($testLines -and $testLines.Count -gt 0) {
+                $testCount = $testLines.Count
+                Write-Host "✓ Found $testCount NUnit tests in $($dll.Name)" -ForegroundColor Green
+                $testDlls += @{
+                  Name = $dll.BaseName
+                  FullPath = $dll.FullName
+                  TestCount = $testCount
+                }
+              } else {
+                Write-Host "  - No test methods found in $($dll.Name)" -ForegroundColor Yellow
+              }
+            } else {
+              Write-Host "  - Cannot run tests on $($dll.Name) (exit code: $testListExitCode)" -ForegroundColor Yellow
+            }
+          }
+          
+          if ($testDlls.Count -eq 0) {
+            Write-Host "✗ No test DLLs found in _Tests_ folder" -ForegroundColor Red
+            exit 1
+          }
+          
+          Write-Host "✓ Identified $($testDlls.Count) test DLL(s):"
+          foreach ($testDll in $testDlls) {
+            Write-Host "  - $($testDll.Name) ($($testDll.TestCount) tests)"
+          }
+          
+          # Convert to JSON for output
+          $testDllsJson = $testDlls | ConvertTo-Json -Compress
+          echo "test-dlls=$testDllsJson" >> $env:GITHUB_OUTPUT
+          
+          # Also output just the names for matrix strategy
+          $testDllNames = $testDlls | ForEach-Object { $_.Name }
+          $testDllNamesJson = $testDllNames | ConvertTo-Json -Compress
+          echo "test-dll-names=$testDllNamesJson" >> $env:GITHUB_OUTPUT
+        shell: pwsh
 
   build:
     runs-on: windows-latest
     needs: prepare-dependencies
-    outputs:
-      test-dll-names: ${{ steps.identify-tests.outputs.test-dll-names }}
     strategy:
       fail-fast: false
       matrix:
@@ -1264,154 +1441,44 @@ jobs:
           retention-days: 90
           compression-level: 6
 
+      - name: Upload BHoM Assemblies
+        uses: actions/upload-artifact@v4
+        with:
+          name: bhom-assemblies-${{ matrix.build-configuration }}
+          path: ${{ env.BHoMFolder }}
+          retention-days: 1
+          compression-level: 6
+
+  tests:
+    runs-on: windows-latest
+    needs: [prepare-dependencies, setup-test, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        build-configuration: ${{ fromJson(needs.prepare-dependencies.outputs.release-configurations) }}
+    env:
+      BHoMFolder: "C:\\ProgramData\\BHoM"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download BHoM Assemblies
+        uses: actions/download-artifact@v4
+        with:
+          name: bhom-assemblies-${{ matrix.build-configuration }}
+          path: ${{ env.BHoMFolder }}
+
       - name: Download Test Toolkit Tests
         uses: actions/download-artifact@v4
         with:
           name: Test-Toolkit-Tests
           path: _Tests_
 
-      - name: Identify tests
-        id: identify-tests
-        run: |
-          Write-Host "Searching for test DLLs in _Tests_ folder..."
-          
-          if (-not (Test-Path "_Tests_")) {
-            Write-Host "✗ _Tests_ folder not found" -ForegroundColor Red
-            exit 1
-          }
-          
-          # Find all DLL files in _Tests_ folder that contain unit tests
-          $testDlls = @()
-          $allDlls = Get-ChildItem "_Tests_" -Filter "*.dll" -File -Recurse
-          
-          if ($allDlls.Count -eq 0) {
-            Write-Host "✗ No DLL files found in _Tests_ folder" -ForegroundColor Red
-            exit 1
-          }
-          
-          Write-Host "Found $($allDlls.Count) DLL files, pre-filtering for NUnit references..."
-          
-          foreach ($dll in $allDlls) {
-            Write-Host "Checking: $($dll.Name)"
-            
-            # Skip known non-test DLLs
-            $dllBaseName = $dll.BaseName
-            if ($dllBaseName -eq "NUnit_Engine" -or $dllBaseName -eq "TestSetup_Engine" -or 
-                $dllBaseName -eq "testhost" -or $dllBaseName -eq "testcentric.engine.metadata" -or
-                $dllBaseName.StartsWith("System.") -or $dllBaseName.StartsWith("Microsoft.") -or
-                $dllBaseName.StartsWith("nunit.", [System.StringComparison]::OrdinalIgnoreCase) -or
-                $dllBaseName.StartsWith("NUnit3.") -or
-                $dllBaseName.StartsWith("Newtonsoft.") -or $dllBaseName.StartsWith("NuGet.") -or
-                $dllBaseName.EndsWith("_oM") -or $dllBaseName.EndsWith("_Engine")) {
-              Write-Host "  - Skipping known non-test DLL: $($dll.Name)" -ForegroundColor Gray
-              continue
-            }
-            
-            # Pre-filter: Check if DLL references nunit.framework.dll using ildasm or alternative methods
-            $hasNUnitReference = $false
-            
-            try {
-              # Method 1: Try using System.Reflection.MetadataLoadContext (more modern approach)
-              Add-Type -AssemblyName System.Reflection.MetadataLoadContext -ErrorAction SilentlyContinue
-              if ([System.Reflection.MetadataLoadContext] -ne $null) {
-                $resolver = [System.Reflection.PathAssemblyResolver]::new(@($dll.Directory.FullName, [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()))
-                $mlc = [System.Reflection.MetadataLoadContext]::new($resolver)
-                try {
-                  $assembly = $mlc.LoadFromAssemblyPath($dll.FullName)
-                  $referencedAssemblies = $assembly.GetReferencedAssemblies()
-                  $hasNUnitReference = $referencedAssemblies | Where-Object { $_.Name -eq "nunit.framework" }
-                  if ($hasNUnitReference) {
-                    Write-Host "  ✓ NUnit framework reference found" -ForegroundColor Cyan
-                  } else {
-                    Write-Host "  - No NUnit framework reference found, skipping" -ForegroundColor Gray
-                  }
-                } finally {
-                  $mlc.Dispose()
-                }
-              } else {
-                throw "MetadataLoadContext not available"
-              }
-            } catch {
-              # Method 2: Fallback to checking file dependencies using PowerShell and .NET reflection
-              try {
-                # Load assembly in a separate AppDomain context to avoid locking
-                $assemblyBytes = [System.IO.File]::ReadAllBytes($dll.FullName)
-                $assembly = [System.Reflection.Assembly]::Load($assemblyBytes)
-                $referencedAssemblies = $assembly.GetReferencedAssemblies()
-                $hasNUnitReference = $referencedAssemblies | Where-Object { $_.Name -eq "nunit.framework" }
-                if ($hasNUnitReference) {
-                  Write-Host "  ✓ NUnit framework reference found (via fallback method)" -ForegroundColor Cyan
-                } else {
-                  Write-Host "  - No NUnit framework reference found, skipping" -ForegroundColor Gray
-                }
-              } catch {
-                Write-Host "  - Could not determine NUnit reference for $($dll.Name), skipping" -ForegroundColor Yellow
-                $hasNUnitReference = $false
-              }
-            }
-            
-            # Skip if no NUnit reference found
-            if (-not $hasNUnitReference) {
-              continue
-            }
-            
-            # Now check for actual tests using dotnet test
-            Write-Host "  - Checking for actual tests..." -ForegroundColor Cyan
-            $testListOutput = & dotnet test "$($dll.FullName)" --list-tests --verbosity quiet 2>&1
-            $testListExitCode = $LASTEXITCODE
-            
-            if ($testListExitCode -eq 0 -and $testListOutput) {
-              # Filter out non-test lines and look for actual test methods
-              $testLines = $testListOutput | Where-Object { 
-                $_ -is [string] -and $_ -and $_.Trim() -and 
-                $_ -notmatch "^Test run for" -and 
-                $_ -notmatch "^Microsoft \(R\)" -and 
-                $_ -notmatch "^Copyright \(c\)" -and
-                $_ -notmatch "^\s*$" -and
-                $_ -match "^\s*\w" 
-              }
-              
-              if ($testLines -and $testLines.Count -gt 0) {
-                $testCount = $testLines.Count
-                Write-Host "✓ Found $testCount NUnit tests in $($dll.Name)" -ForegroundColor Green
-                $testDlls += @{
-                  Name = $dll.BaseName
-                  FullPath = $dll.FullName
-                  TestCount = $testCount
-                }
-              } else {
-                Write-Host "  - No test methods found in $($dll.Name)" -ForegroundColor Yellow
-              }
-            } else {
-              Write-Host "  - Cannot run tests on $($dll.Name) (exit code: $testListExitCode)" -ForegroundColor Yellow
-            }
-          }
-          
-          if ($testDlls.Count -eq 0) {
-            Write-Host "✗ No test DLLs found in _Tests_ folder" -ForegroundColor Red
-            exit 1
-          }
-          
-          Write-Host "✓ Identified $($testDlls.Count) test DLL(s):"
-          foreach ($testDll in $testDlls) {
-            Write-Host "  - $($testDll.Name) ($($testDll.TestCount) tests)"
-          }
-          
-          # Convert to JSON for output
-          $testDllsJson = $testDlls | ConvertTo-Json -Compress
-          echo "test-dlls=$testDllsJson" >> $env:GITHUB_OUTPUT
-          
-          # Also output just the names for matrix strategy
-          $testDllNames = $testDlls | ForEach-Object { $_.Name }
-          $testDllNamesJson = $testDllNames | ConvertTo-Json -Compress
-          echo "test-dll-names=$testDllNamesJson" >> $env:GITHUB_OUTPUT
-        shell: pwsh
-
       - name: Run individual tests
         env:
           DOTNET_STARTUP_HOOKS: ${{ env.BHoMFolder }}\Assemblies\TestStartupHook.dll
         run: |
-          $testDlls = '${{ steps.identify-tests.outputs.test-dlls }}' | ConvertFrom-Json
+          $testDlls = '${{ needs.setup-test.outputs.test-dll-names }}' | ConvertFrom-Json
           
           if (-not $testDlls -or $testDlls.Count -eq 0) {
             Write-Host "✗ No test DLLs identified" -ForegroundColor Red
@@ -1422,17 +1489,24 @@ jobs:
           New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
           
           # Check if we have test parameters to add
-          $updatedAssemblies = '${{ steps.package-outputs.outputs.updated-assemblies }}'
+          $updatedAssemblies = '${{ needs.build.outputs.updated-assemblies }}'
           $changedFiles = '${{ needs.prepare-dependencies.outputs.changed-files }}'
           $hasTestParams = $updatedAssemblies -or $changedFiles
           
           $overallSuccess = $true
           $testResults = @()
           
-          foreach ($testDll in $testDlls) {
-            Write-Host "Running tests for: $($testDll.Name) ($($testDll.TestCount) tests)"
+          foreach ($testDllName in $testDlls) {
+            Write-Host "Running tests for: $testDllName"
             
-            $logFileName = "test-results-$($testDll.Name).trx"
+            # Find the DLL file in _Tests_ folder
+            $testDllPath = Get-ChildItem "_Tests_" -Filter "$testDllName.dll" -File -Recurse | Select-Object -First 1
+            if (-not $testDllPath) {
+              Write-Host "✗ Could not find $testDllName.dll in _Tests_ folder" -ForegroundColor Red
+              continue
+            }
+            
+            $logFileName = "test-results-$testDllName.trx"
             Write-Host "Log file: $logFileName"
             
             try {
@@ -1441,7 +1515,7 @@ jobs:
                 # Use Start-Process to avoid PowerShell escaping issues
                 $processArgs = @(
                   "test"
-                  "$($testDll.FullPath)"
+                  "$($testDllPath.FullName)"
                   "--verbosity"
                   "normal"
                   "--logger"
@@ -1454,13 +1528,11 @@ jobs:
                 $processArgs += "--"
                 
                 # Add UpdatedAssemblies parameter if available
-                $updatedAssemblies = '${{ steps.package-outputs.outputs.updated-assemblies }}'
                 if ($updatedAssemblies) {
                   $processArgs += "TestRunParameters.Parameter(name=`"UpdatedAssemblies`", value=`"$updatedAssemblies`")"
                 }
                 
                 # Add UpdatedFiles parameter if available
-                $changedFiles = '${{ needs.prepare-dependencies.outputs.changed-files }}'
                 if ($changedFiles) {
                   $processArgs += "TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
                 }
@@ -1469,21 +1541,21 @@ jobs:
                 & dotnet @processArgs
               } else {
                 Write-Host "Running without additional parameters"
-                dotnet test $($testDll.FullPath) --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
+                dotnet test $($testDllPath.FullName) --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
               }
               
               if ($LASTEXITCODE -eq 0) {
-                Write-Host "✓ Tests passed for $($testDll.Name)" -ForegroundColor Green
-                $testResults += @{ Name = $testDll.Name; Status = "Passed"; LogFile = $logFileName }
+                Write-Host "✓ Tests passed for $testDllName" -ForegroundColor Green
+                $testResults += @{ Name = $testDllName; Status = "Passed"; LogFile = $logFileName }
               } else {
-                Write-Host "⚠ Some tests failed for $($testDll.Name)" -ForegroundColor Yellow
+                Write-Host "⚠ Some tests failed for $testDllName" -ForegroundColor Yellow
                 $overallSuccess = $false
-                $testResults += @{ Name = $testDll.Name; Status = "Failed"; LogFile = $logFileName }
+                $testResults += @{ Name = $testDllName; Status = "Failed"; LogFile = $logFileName }
               }
             } catch {
-              Write-Host "✗ Error running tests for $($testDll.Name): $($_.Exception.Message)" -ForegroundColor Red
+              Write-Host "✗ Error running tests for ${testDllName}: $($_.Exception.Message)" -ForegroundColor Red
               $overallSuccess = $false
-              $testResults += @{ Name = $testDll.Name; Status = "Error"; LogFile = $logFileName }
+              $testResults += @{ Name = $testDllName; Status = "Error"; LogFile = $logFileName }
             }
           }
           
@@ -1513,12 +1585,12 @@ jobs:
           path: test-results/*.trx
 
   test-report:
-    if: always() && needs.build.outputs.test-dll-names != '[]'
+    if: always() && needs.setup-test.outputs.test-dll-names != '[]'
     runs-on: ubuntu-latest
-    needs: build
+    needs: [setup-test, tests]
     strategy:
       matrix:
-        test-dll: ${{ fromJson(needs.build.outputs.test-dll-names) }}
+        test-dll: ${{ fromJson(needs.setup-test.outputs.test-dll-names) }}
       fail-fast: false
 
     steps:
