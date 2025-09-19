@@ -1430,6 +1430,7 @@ jobs:
         shell: pwsh
 
       - name: Run individual tests
+        id: run-tests
         env:
           DOTNET_STARTUP_HOOKS: ${{ env.BHoMFolder }}\Assemblies\TestStartupHook.dll
         run: |
@@ -1582,6 +1583,13 @@ jobs:
             Write-Host "  $($result.Name): $status"
           }
           
+          # Output the TRX file names for test reporting
+          $trxFileNames = $testResults | ForEach-Object { 
+            $_.LogFile -replace "\.trx$", "" 
+          }
+          $trxFileNamesJson = $trxFileNames | ConvertTo-Json -Compress
+          echo "trx-file-names=$trxFileNamesJson" >> $env:GITHUB_OUTPUT
+          
           if (-not $overallSuccess) {
             Write-Host "⚠ Some test DLLs had failures" -ForegroundColor Yellow
             exit 1
@@ -1593,10 +1601,10 @@ jobs:
       - name: Generate Dynamic Test Reports Action
         if: always()
         run: |
-          $testDllNames = '${{ steps.identify-tests.outputs.test-dll-names }}' | ConvertFrom-Json
+          $trxFileNames = '${{ steps.run-tests.outputs.trx-file-names }}' | ConvertFrom-Json
           
-          if (-not $testDllNames -or $testDllNames.Count -eq 0) {
-            Write-Host "No test DLLs to create reports for"
+          if (-not $trxFileNames -or $trxFileNames.Count -eq 0) {
+            Write-Host "No TRX files to create reports for"
             exit 0
           }
           
@@ -1606,33 +1614,33 @@ jobs:
           
           # Start building the composite action YAML
           $actionYaml = "name: 'Dynamic Test Reports'`n"
-          $actionYaml += "description: 'Generate test reports for all identified test DLLs'`n"
+          $actionYaml += "description: 'Generate test reports for all test executions'`n"
           $actionYaml += "runs:`n"
           $actionYaml += "  using: 'composite'`n"
           $actionYaml += "  steps:`n"
           
-          # Add a step for each test DLL that has a TRX file
-          foreach ($testDllName in $testDllNames) {
-            $trxFile = "test-results/test-results-$testDllName.trx"
+          # Add a step for each TRX file that was generated
+          foreach ($trxFileName in $trxFileNames) {
+            $trxFile = "test-results/$trxFileName.trx"
             if (Test-Path $trxFile) {
-              Write-Host "Adding test report step for: $testDllName"
+              Write-Host "Adding test report step for: $trxFileName"
               
-              $stepYaml = "    - name: Test Report - $testDllName`n"
-              $stepYaml += "      if: always() && hashFiles('test-results/**/test-results-$testDllName.trx') != ''`n"
+              $stepYaml = "    - name: Test Report - $trxFileName`n"
+              $stepYaml += "      if: always() && hashFiles('test-results/**/$trxFileName.trx') != ''`n"
               $stepYaml += "      uses: dorny/test-reporter@v2`n"
               $stepYaml += "      with:`n"
-              $stepYaml += "        name: Test Results - $testDllName`n"
-              $stepYaml += "        path: test-results/**/test-results-$testDllName.trx`n"
+              $stepYaml += "        name: Test Results - $trxFileName`n"
+              $stepYaml += "        path: test-results/**/$trxFileName.trx`n"
               $stepYaml += "        reporter: dotnet-trx`n"
               $stepYaml += "        list-tests: failed`n"
               $stepYaml += "        list-suites: all`n"
-              $stepYaml += "        badge-title: $testDllName`n"
+              $stepYaml += "        badge-title: $trxFileName`n"
               $stepYaml += "        use-actions-summary: false`n"
               $stepYaml += "      env:`n"
               $stepYaml += "        GITHUB_TOKEN: `${{ github.token }}`n"
               $actionYaml += "`n" + $stepYaml
             } else {
-              Write-Host "⚠ No TRX file found for $testDllName - skipping report" -ForegroundColor Yellow
+              Write-Host "⚠ TRX file not found: $trxFile - skipping report" -ForegroundColor Yellow
             }
           }
           
