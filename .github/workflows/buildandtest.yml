@@ -1576,10 +1576,9 @@ jobs:
           }
         shell: pwsh
 
-      - name: Create Test Reports
+      - name: Generate Dynamic Test Reports Action
         if: always()
         run: |
-          Write-Host "Creating test reports..."
           $testDllNames = '${{ steps.identify-tests.outputs.test-dll-names }}' | ConvertFrom-Json
           
           if (-not $testDllNames -or $testDllNames.Count -eq 0) {
@@ -1587,29 +1586,49 @@ jobs:
             exit 0
           }
           
-          # Install test reporter tool
-          Write-Host "Installing dotnet-reportgenerator-globaltool..."
-          dotnet tool install -g dotnet-reportgenerator-globaltool --version 5.1.26 2>$null
+          # Create the directory for the composite action
+          $actionDir = ".github/actions/dynamic-test-reports"
+          New-Item -ItemType Directory -Force -Path $actionDir | Out-Null
           
+          # Start building the composite action YAML
+          $actionYaml = "name: 'Dynamic Test Reports'`n"
+          $actionYaml += "description: 'Generate test reports for all identified test DLLs'`n"
+          $actionYaml += "runs:`n"
+          $actionYaml += "  using: 'composite'`n"
+          $actionYaml += "  steps:`n"
+          
+          # Add a step for each test DLL that has a TRX file
           foreach ($testDllName in $testDllNames) {
             $trxFile = "test-results/test-results-$testDllName.trx"
             if (Test-Path $trxFile) {
-              Write-Host "Processing test results for: $testDllName"
+              Write-Host "Adding test report step for: $testDllName"
               
-              # Create individual HTML report
-              $reportDir = "test-reports/$testDllName"
-              New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
-              
-              try {
-                reportgenerator "-reports:$trxFile" "-targetdir:$reportDir" "-reporttypes:Html" 2>$null
-                Write-Host "✓ Created HTML report for $testDllName at $reportDir"
-              } catch {
-                Write-Host "⚠ Could not create HTML report for $testDllName - $($_.Exception.Message)" -ForegroundColor Yellow
-              }
+              $stepYaml = "    - name: Test Report - $testDllName`n"
+              $stepYaml += "      if: always() && hashFiles('test-results/**/test-results-$testDllName.trx') != ''`n"
+              $stepYaml += "      uses: dorny/test-reporter@v2`n"
+              $stepYaml += "      with:`n"
+              $stepYaml += "        name: Test Results - $testDllName`n"
+              $stepYaml += "        path: test-results/**/test-results-$testDllName.trx`n"
+              $stepYaml += "        reporter: dotnet-trx`n"
+              $stepYaml += "        list-tests: failed`n"
+              $stepYaml += "        list-suites: all`n"
+              $stepYaml += "        badge-title: $testDllName`n"
+              $stepYaml += "        use-actions-summary: false`n"
+              $stepYaml += "      env:`n"
+              $stepYaml += "        GITHUB_TOKEN: `${{ github.token }}`n"
+              $actionYaml += "`n" + $stepYaml
             } else {
-              Write-Host "⚠ No TRX file found for $testDllName" -ForegroundColor Yellow
+              Write-Host "⚠ No TRX file found for $testDllName - skipping report" -ForegroundColor Yellow
             }
           }
           
-          Write-Host "✓ Test report generation completed"
+          # Write the composite action file
+          $actionYaml | Out-File -FilePath "$actionDir/action.yml" -Encoding UTF8
+          
+          Write-Host "✓ Generated dynamic composite action with individual dorny/test-reporter steps"
+          Write-Host "Action file created at: $actionDir/action.yml"
         shell: pwsh
+
+      - name: Execute Dynamic Test Reports
+        if: always()
+        uses: ./.github/actions/dynamic-test-reports
