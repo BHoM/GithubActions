@@ -117,8 +117,13 @@ jobs:
           }
           
           # Convert to JSON for matrix strategy
-          $configsJson = $configs | ConvertTo-Json -Compress
-          $releaseConfigsJson = $releaseConfigs | ConvertTo-Json -Compress
+          # Force array format even for single items by wrapping in array if needed
+          $configsJson = if ($configs.Count -eq 1) { "[$($configs[0] | ConvertTo-Json -Compress)]" } else { $configs | ConvertTo-Json -Compress }
+          $releaseConfigsJson = if ($releaseConfigs.Count -eq 1) { "[$($releaseConfigs[0] | ConvertTo-Json -Compress)]" } else { $releaseConfigs | ConvertTo-Json -Compress }
+          
+          Write-Host "`nJSON outputs for matrix:"
+          Write-Host "build-configurations=$configsJson"
+          Write-Host "release-configurations=$releaseConfigsJson"
           
           echo "build-configurations=$configsJson" >> $env:GITHUB_OUTPUT
           echo "release-configurations=$releaseConfigsJson" >> $env:GITHUB_OUTPUT
@@ -1556,7 +1561,7 @@ jobs:
           path: test-results/*.trx
 
   test-report:
-    if: always() && needs.setup-test.outputs.test-dll-names != '[]'
+    if: always() && needs.setup-test.outputs.test-dll-names != '[]' && !cancelled()
     runs-on: ubuntu-latest
     needs: [setup-test, tests]
     strategy:
