@@ -1430,7 +1430,6 @@ jobs:
         shell: pwsh
 
       - name: Run individual tests
-        id: run-tests
         env:
           DOTNET_STARTUP_HOOKS: ${{ env.BHoMFolder }}\Assemblies\TestStartupHook.dll
         run: |
@@ -1583,13 +1582,6 @@ jobs:
             Write-Host "  $($result.Name): $status"
           }
           
-          # Output the TRX file names for test reporting
-          $trxFileNames = $testResults | ForEach-Object { 
-            $_.LogFile -replace "\.trx$", "" 
-          }
-          $trxFileNamesJson = $trxFileNames | ConvertTo-Json -Compress
-          echo "trx-file-names=$trxFileNamesJson" >> $env:GITHUB_OUTPUT
-          
           if (-not $overallSuccess) {
             Write-Host "⚠ Some test DLLs had failures" -ForegroundColor Yellow
             exit 1
@@ -1598,13 +1590,87 @@ jobs:
           }
         shell: pwsh
 
+      - name: Merge TRX files by test DLL
+        if: always()
+        run: |
+          Write-Host "Merging TRX files by test DLL..."
+          
+          # Get all TRX files
+          $trxFiles = Get-ChildItem "test-results" -Filter "*.trx" -File
+          
+          if ($trxFiles.Count -eq 0) {
+            Write-Host "No TRX files found to merge"
+            exit 0
+          }
+          
+          # Group TRX files by test DLL (remove build config suffix)
+          $testDllGroups = @{}
+          foreach ($trxFile in $trxFiles) {
+            # Extract test DLL name from filename like "test-results-TestDll-Release.trx" -> "TestDll"
+            if ($trxFile.BaseName -match "^test-results-(.+?)(?:-[^-]+)?$") {
+              $testDllName = $matches[1]
+              
+              if (-not $testDllGroups.ContainsKey($testDllName)) {
+                $testDllGroups[$testDllName] = @()
+              }
+              $testDllGroups[$testDllName] += $trxFile
+              
+              Write-Host "Grouped $($trxFile.Name) under test DLL: $testDllName"
+            }
+          }
+          
+          # Merge TRX files for each test DLL
+          foreach ($testDllName in $testDllGroups.Keys) {
+            $trxFilesForDll = $testDllGroups[$testDllName]
+            $finalTrxFile = "test-results/test-results-$testDllName.trx"
+            
+            Write-Host "Merging $($trxFilesForDll.Count) TRX file(s) for $testDllName into $finalTrxFile"
+            
+            if ($trxFilesForDll.Count -eq 1) {
+              # Single file - just rename it
+              Copy-Item $trxFilesForDll[0].FullName -Destination $finalTrxFile -Force
+              Write-Host "✓ Renamed single TRX file for $testDllName"
+            } else {
+              # Multiple files - use dotnet test-results merge (if available) or simple XML merge
+              try {
+                # Try using dotnet test-results merge command (requires .NET 6+)
+                $sourceFiles = $trxFilesForDll | ForEach-Object { $_.FullName }
+                $mergeArgs = @("test-results", "merge") + $sourceFiles + @("--output", $finalTrxFile)
+                
+                Write-Host "Attempting to merge using: dotnet $($mergeArgs -join ' ')"
+                & dotnet @mergeArgs
+                
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✓ Successfully merged TRX files for $testDllName using dotnet test-results merge"
+                } else {
+                  throw "dotnet test-results merge failed with exit code $LASTEXITCODE"
+                }
+              } catch {
+                Write-Host "dotnet test-results merge not available or failed, using first file only: $($_.Exception.Message)" -ForegroundColor Yellow
+                # Fallback: just use the first (or last) TRX file
+                Copy-Item $trxFilesForDll[-1].FullName -Destination $finalTrxFile -Force
+                Write-Host "✓ Used last TRX file for $testDllName as fallback"
+              }
+            }
+            
+            # Clean up original TRX files
+            foreach ($originalFile in $trxFilesForDll) {
+              if ($originalFile.FullName -ne $finalTrxFile) {
+                Remove-Item $originalFile.FullName -Force
+              }
+            }
+          }
+          
+          Write-Host "✓ TRX file merging completed"
+        shell: pwsh
+
       - name: Generate Dynamic Test Reports Action
         if: always()
         run: |
-          $trxFileNames = '${{ steps.run-tests.outputs.trx-file-names }}' | ConvertFrom-Json
+          $testDllNames = '${{ steps.identify-tests.outputs.test-dll-names }}' | ConvertFrom-Json
           
-          if (-not $trxFileNames -or $trxFileNames.Count -eq 0) {
-            Write-Host "No TRX files to create reports for"
+          if (-not $testDllNames -or $testDllNames.Count -eq 0) {
+            Write-Host "No test DLLs to create reports for"
             exit 0
           }
           
@@ -1614,33 +1680,33 @@ jobs:
           
           # Start building the composite action YAML
           $actionYaml = "name: 'Dynamic Test Reports'`n"
-          $actionYaml += "description: 'Generate test reports for all test executions'`n"
+          $actionYaml += "description: 'Generate test reports for all identified test DLLs'`n"
           $actionYaml += "runs:`n"
           $actionYaml += "  using: 'composite'`n"
           $actionYaml += "  steps:`n"
           
-          # Add a step for each TRX file that was generated
-          foreach ($trxFileName in $trxFileNames) {
-            $trxFile = "test-results/$trxFileName.trx"
+          # Add a step for each test DLL that has a TRX file
+          foreach ($testDllName in $testDllNames) {
+            $trxFile = "test-results/test-results-$testDllName.trx"
             if (Test-Path $trxFile) {
-              Write-Host "Adding test report step for: $trxFileName"
+              Write-Host "Adding test report step for: $testDllName"
               
-              $stepYaml = "    - name: Test Report - $trxFileName`n"
-              $stepYaml += "      if: always() && hashFiles('test-results/**/$trxFileName.trx') != ''`n"
+              $stepYaml = "    - name: Test Report - $testDllName`n"
+              $stepYaml += "      if: always() && hashFiles('test-results/**/test-results-$testDllName.trx') != ''`n"
               $stepYaml += "      uses: dorny/test-reporter@v2`n"
               $stepYaml += "      with:`n"
-              $stepYaml += "        name: Test Results - $trxFileName`n"
-              $stepYaml += "        path: test-results/**/$trxFileName.trx`n"
+              $stepYaml += "        name: Test Results - $testDllName`n"
+              $stepYaml += "        path: test-results/**/test-results-$testDllName.trx`n"
               $stepYaml += "        reporter: dotnet-trx`n"
               $stepYaml += "        list-tests: failed`n"
               $stepYaml += "        list-suites: all`n"
-              $stepYaml += "        badge-title: $trxFileName`n"
+              $stepYaml += "        badge-title: $testDllName`n"
               $stepYaml += "        use-actions-summary: false`n"
               $stepYaml += "      env:`n"
               $stepYaml += "        GITHUB_TOKEN: `${{ github.token }}`n"
               $actionYaml += "`n" + $stepYaml
             } else {
-              Write-Host "⚠ TRX file not found: $trxFile - skipping report" -ForegroundColor Yellow
+              Write-Host "⚠ No TRX file found for $testDllName - skipping report" -ForegroundColor Yellow
             }
           }
           
