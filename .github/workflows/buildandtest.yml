@@ -1150,38 +1150,6 @@ jobs:
           path: ${{ env.BHoMFolder }}
           merge-multiple: true
 
-      - name: Collect updated assemblies from merged files
-        id: collect-updated-assemblies
-        run: |
-          Write-Host "Collecting updated assemblies from merged updated-assemblies files..."
-          
-          $allUpdatedAssemblies = @()
-          
-          # Find all updated-assemblies-*.txt files that were merged
-          $updatedAssembliesFiles = Get-ChildItem "$env:BHoMFolder" -Filter "updated-assemblies-*.txt" -File
-          
-          foreach ($file in $updatedAssembliesFiles) {
-            Write-Host "Reading updated assemblies from: $($file.Name)"
-            $assembliesFromFile = Get-Content $file.FullName -Raw
-            $assembliesFromFile = $assembliesFromFile.Trim()
-            
-            if ($assembliesFromFile) {
-              Write-Host "Found assemblies: $assembliesFromFile"
-              $allUpdatedAssemblies += $assembliesFromFile.Split(';')
-            }
-            
-            # Clean up the info file
-            Remove-Item $file.FullName -Force
-          }
-          
-          # Get distinct list
-          $distinctAssemblies = $allUpdatedAssemblies | Sort-Object | Get-Unique
-          $combinedAssemblies = $distinctAssemblies -join ';'
-          
-          Write-Host "Combined distinct updated assemblies: $combinedAssemblies"
-          echo "updated-assemblies=$combinedAssemblies" >> $env:GITHUB_OUTPUT
-        shell: pwsh
-
       - name: Download Test Toolkit Tests
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.GH_TOKEN || github.token }}
@@ -1475,67 +1443,132 @@ jobs:
           # Create test-results directory
           New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
           
-          # Check if we have test parameters to add
-          $updatedAssemblies = '${{ steps.collect-updated-assemblies.outputs.updated-assemblies }}'
+          # Find all updated-assemblies-*.txt files from release builds
+          $updatedAssembliesFiles = Get-ChildItem "$env:BHoMFolder" -Filter "updated-assemblies-*.txt" -File
           $changedFiles = '${{ needs.prepare-dependencies.outputs.changed-files }}'
-          $hasTestParams = $updatedAssemblies -or $changedFiles
           
           $overallSuccess = $true
           $testResults = @()
           
-          foreach ($testDll in $testDlls) {
-            Write-Host "Running tests for: $($testDll.Name)"
+          if ($updatedAssembliesFiles.Count -gt 0) {
+            Write-Host "Found $($updatedAssembliesFiles.Count) release build(s) to test"
             
-            $logFileName = "test-results-$($testDll.Name).trx"
-            Write-Host "Log file: $logFileName"
-            
-            try {
-              if ($hasTestParams) {
-                Write-Host "Running with test parameters"
-                # Use Start-Process to avoid PowerShell escaping issues
-                $processArgs = @(
-                  "test"
-                  "$($testDll.FullPath)"
-                  "--verbosity"
-                  "normal"
-                  "--logger"
-                  "trx;LogFileName=$logFileName"
-                  "--results-directory"
-                  "test-results"
-                )
+            # Run tests once per release build
+            foreach ($updatedAssembliesFile in $updatedAssembliesFiles) {
+              # Extract build configuration from filename (updated-assemblies-Release.txt -> Release)
+              $buildConfig = $updatedAssembliesFile.BaseName -replace "^updated-assemblies-", ""
+              Write-Host "`n=== Running tests for release build: $buildConfig ===" -ForegroundColor Cyan
+              
+              # Read the updated assemblies for this build
+              $updatedAssemblies = Get-Content $updatedAssembliesFile.FullName -Raw
+              $updatedAssemblies = $updatedAssemblies.Trim()
+              
+              $hasTestParams = $updatedAssemblies -or $changedFiles
+              
+              foreach ($testDll in $testDlls) {
+                Write-Host "Running tests for: $($testDll.Name) (build: $buildConfig)"
                 
-                # Add test parameters as separate arguments
-                $processArgs += "--"
+                $logFileName = "test-results-$($testDll.Name)-$buildConfig.trx"
+                Write-Host "Log file: $logFileName"
                 
-                # Add UpdatedAssemblies parameter if available
-                if ($updatedAssemblies) {
-                  $processArgs += "TestRunParameters.Parameter(name=`"UpdatedAssemblies`", value=`"$updatedAssemblies`")"
+                try {
+                  if ($hasTestParams) {
+                    Write-Host "Running with test parameters for $buildConfig"
+                    # Use Start-Process to avoid PowerShell escaping issues
+                    $processArgs = @(
+                      "test"
+                      "$($testDll.FullPath)"
+                      "--verbosity"
+                      "normal"
+                      "--logger"
+                      "trx;LogFileName=$logFileName"
+                      "--results-directory"
+                      "test-results"
+                    )
+                    
+                    # Add test parameters as separate arguments
+                    $processArgs += "--"
+                    
+                    # Add UpdatedAssemblies parameter if available
+                    if ($updatedAssemblies) {
+                      $processArgs += "TestRunParameters.Parameter(name=`"UpdatedAssemblies`", value=`"$updatedAssemblies`")"
+                    }
+                    
+                    # Add UpdatedFiles parameter if available
+                    if ($changedFiles) {
+                      $processArgs += "TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
+                    }
+                    
+                    Write-Host "Executing: dotnet $($processArgs -join ' ')"
+                    & dotnet @processArgs
+                  } else {
+                    Write-Host "Running without additional parameters for $buildConfig"
+                    dotnet test $($testDll.FullPath) --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
+                  }
+                  
+                  if ($LASTEXITCODE -eq 0) {
+                    Write-Host "✓ Tests passed for $($testDll.Name) ($buildConfig)" -ForegroundColor Green
+                    $testResults += @{ Name = "$($testDll.Name)-$buildConfig"; Status = "Passed"; LogFile = $logFileName }
+                  } else {
+                    Write-Host "⚠ Some tests failed for $($testDll.Name) ($buildConfig)" -ForegroundColor Yellow
+                    $overallSuccess = $false
+                    $testResults += @{ Name = "$($testDll.Name)-$buildConfig"; Status = "Failed"; LogFile = $logFileName }
+                  }
+                } catch {
+                  Write-Host "✗ Error running tests for $($testDll.Name) ($buildConfig): $($_.Exception.Message)" -ForegroundColor Red
+                  $overallSuccess = $false
+                  $testResults += @{ Name = "$($testDll.Name)-$buildConfig"; Status = "Error"; LogFile = $logFileName }
                 }
-                
-                # Add UpdatedFiles parameter if available
-                if ($changedFiles) {
-                  $processArgs += "TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
-                }
-                
-                Write-Host "Executing: dotnet $($processArgs -join ' ')"
-                & dotnet @processArgs
-              } else {
-                Write-Host "Running without additional parameters"
-                dotnet test $($testDll.FullPath) --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
               }
               
-              if ($LASTEXITCODE -eq 0) {
-                Write-Host "✓ Tests passed for $($testDll.Name)" -ForegroundColor Green
-                $testResults += @{ Name = $testDll.Name; Status = "Passed"; LogFile = $logFileName }
-              } else {
-                Write-Host "⚠ Some tests failed for $($testDll.Name)" -ForegroundColor Yellow
+              # Clean up the updated assemblies file for this build
+              Remove-Item $updatedAssembliesFile.FullName -Force
+            }
+          } else {
+            Write-Host "No release builds found - running tests without specific assemblies parameters"
+            
+            foreach ($testDll in $testDlls) {
+              Write-Host "Running tests for: $($testDll.Name)"
+              
+              $logFileName = "test-results-$($testDll.Name).trx"
+              Write-Host "Log file: $logFileName"
+              
+              try {
+                if ($changedFiles) {
+                  Write-Host "Running with changed files parameter only"
+                  $processArgs = @(
+                    "test"
+                    "$($testDll.FullPath)"
+                    "--verbosity"
+                    "normal"
+                    "--logger"
+                    "trx;LogFileName=$logFileName"
+                    "--results-directory"
+                    "test-results"
+                    "--"
+                    "TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
+                  )
+                  
+                  Write-Host "Executing: dotnet $($processArgs -join ' ')"
+                  & dotnet @processArgs
+                } else {
+                  Write-Host "Running without additional parameters"
+                  dotnet test $($testDll.FullPath) --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
+                }
+                
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✓ Tests passed for $($testDll.Name)" -ForegroundColor Green
+                  $testResults += @{ Name = $testDll.Name; Status = "Passed"; LogFile = $logFileName }
+                } else {
+                  Write-Host "⚠ Some tests failed for $($testDll.Name)" -ForegroundColor Yellow
+                  $overallSuccess = $false
+                  $testResults += @{ Name = $testDll.Name; Status = "Failed"; LogFile = $logFileName }
+                }
+              } catch {
+                Write-Host "✗ Error running tests for $($testDll.Name): $($_.Exception.Message)" -ForegroundColor Red
                 $overallSuccess = $false
-                $testResults += @{ Name = $testDll.Name; Status = "Failed"; LogFile = $logFileName }
+                $testResults += @{ Name = $testDll.Name; Status = "Error"; LogFile = $logFileName }
               }
-            } catch {
-              Write-Host "✗ Error running tests for $($testDll.Name): $($_.Exception.Message)" -ForegroundColor Red
-              $overallSuccess = $false
-              $testResults += @{ Name = $testDll.Name; Status = "Error"; LogFile = $logFileName }
             }
           }
           
