@@ -33,15 +33,17 @@ concurrency:  # cancel in progress runs if this workflow is triggered again. Mak
   cancel-in-progress: true
 
 jobs:
-  prepare-dependencies:
-    runs-on: windows-latest
+  setup-configurations-and-dependencies:
+    runs-on: ubuntu-latest
     outputs:
       build-configurations: ${{ steps.discover-configs.outputs.build-configurations }}
       release-configurations: ${{ steps.discover-configs.outputs.release-configurations }}
       dependencies-built: ${{ steps.build-summary.outputs.dependencies-built }}
       changed-files: ${{ steps.get-changed-files.outputs.changed-files }}
+      missing-dependencies: ${{ steps.download-deps.outputs.missing-dependencies }}
+      branch-map: ${{ steps.determine-branches.outputs.branch-map }}
     env:
-      BHoMFolder: "C:\\ProgramData\\BHoM"
+      BHoMFolder: "/tmp/BHoM"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -50,203 +52,151 @@ jobs:
         id: discover-configs
         run: |
           # Find the .sln file in the current directory
-          $sln_files = Get-ChildItem -Filter "*.sln" -File
+          sln_files=$(find . -maxdepth 1 -name "*.sln" -type f)
           
-          if ($sln_files.Count -eq 0) {
-            Write-Host "✗ No .sln file found in root directory" -ForegroundColor Red
-            echo "build-configurations=[]" >> $env:GITHUB_OUTPUT
-            echo "release-configurations=[]" >> $env:GITHUB_OUTPUT
+          if [ -z "$sln_files" ]; then
+            echo "✗ No .sln file found in root directory" >&2
+            echo "build-configurations=[]" >> $GITHUB_OUTPUT
+            echo "release-configurations=[]" >> $GITHUB_OUTPUT
             exit 1
-          }
+          fi
           
-          if ($sln_files.Count -gt 1) {
-            Write-Host "⚠ Multiple .sln files found, using the first one: $($sln_files[0].Name)" -ForegroundColor Yellow
-          }
+          sln_count=$(echo "$sln_files" | wc -l)
+          if [ $sln_count -gt 1 ]; then
+            echo "⚠ Multiple .sln files found, using the first one" >&2
+          fi
           
-          $sln_file = $sln_files[0]
-          Write-Host "Analyzing solution file: $($sln_file.Name)" -ForegroundColor Cyan
+          sln_file=$(echo "$sln_files" | head -n1)
+          echo "Analyzing solution file: $(basename "$sln_file")"
           
           # Parse solution file to find build configurations
-          $content = Get-Content $sln_file.FullName
-          $configs = @()
-          $releaseConfigs = @()
+          configs=""
+          release_configs=""
+          in_config_section=false
           
-          # Look for GlobalSection(SolutionConfigurationPlatforms) section
-          $inConfigSection = $false
-          foreach ($line in $content) {
-            if ($line -match "GlobalSection\(SolutionConfigurationPlatforms\)") {
-              $inConfigSection = $true
+          while IFS= read -r line; do
+            if [[ $line == *"GlobalSection(SolutionConfigurationPlatforms)"* ]]; then
+              in_config_section=true
               continue
-            }
-            if ($inConfigSection -and $line -match "EndGlobalSection") {
+            fi
+            if $in_config_section && [[ $line == *"EndGlobalSection"* ]]; then
               break
-            }
-            if ($inConfigSection -and $line -match "^\s*([^=]+)\s*=") {
-              $fullConfig = $matches[1].Trim()
-              # Extract only the configuration name (before the pipe)
-              if ($fullConfig -match "^([^|]+)") {
-                $config = $matches[1].Trim()
-                if ($configs -notcontains $config) {
-                  $configs += $config
-                  Write-Host "Found build configuration: $config"
-                  
-                  # Check if it's a Release configuration (starts with "Release")
-                  if ($config -match "^Release") {
-                    $releaseConfigs += $config
-                    Write-Host "  → Identified as Release configuration"
-                  }
-                }
-              }
-            }
-          }
+            fi
+            if $in_config_section && [[ $line =~ ^[[:space:]]*([^=]+)[[:space:]]*= ]]; then
+              full_config="${BASH_REMATCH[1]}"
+              full_config=$(echo "$full_config" | xargs)  # trim whitespace
+              if [[ $full_config == *"|"* ]]; then
+                config=$(echo "$full_config" | cut -d'|' -f1 | xargs)
+              else
+                config="$full_config"
+              fi
+              
+              if [[ ! $configs == *"\"$config\""* ]]; then
+                if [ -n "$configs" ]; then
+                  configs="$configs,"
+                fi
+                configs="$configs\"$config\""
+                echo "Found build configuration: $config"
+                
+                # Check if it's a Release configuration
+                if [[ $config == Release* ]]; then
+                  if [ -n "$release_configs" ]; then
+                    release_configs="$release_configs,"
+                  fi
+                  release_configs="$release_configs\"$config\""
+                  echo "  → Identified as Release configuration"
+                fi
+              fi
+            fi
+          done < "$sln_file"
           
-          if ($configs.Count -eq 0) {
-            Write-Host "⚠ No build configurations found in solution file, using default" -ForegroundColor Yellow
-            $configs = @("Debug", "Release")
-            $releaseConfigs = @("Release")
-          }
+          if [ -z "$configs" ]; then
+            echo "⚠ No build configurations found in solution file, using default"
+            configs='"Debug","Release"'
+            release_configs='"Release"'
+          fi
           
-          Write-Host "`nDiscovered build configurations:"
-          for ($i = 0; $i -lt $configs.Count; $i++) {
-            Write-Host "  $($i + 1). $($configs[$i])"
-          }
+          echo -e "\nDiscovered build configurations: [$configs]"
+          echo "Release configurations: [$release_configs]"
           
-          Write-Host "`nRelease configurations (for artifact download):"
-          for ($i = 0; $i -lt $releaseConfigs.Count; $i++) {
-            Write-Host "  $($i + 1). $($releaseConfigs[$i])"
-          }
-          
-          # Convert to JSON for matrix strategy
-          # Force array format even for single items by wrapping in array if needed
-          $configsJson = if ($configs.Count -eq 1) { "[$($configs[0] | ConvertTo-Json -Compress)]" } else { $configs | ConvertTo-Json -Compress }
-          $releaseConfigsJson = if ($releaseConfigs.Count -eq 1) { "[$($releaseConfigs[0] | ConvertTo-Json -Compress)]" } else { $releaseConfigs | ConvertTo-Json -Compress }
-          
-          Write-Host "`nJSON outputs for matrix:"
-          Write-Host "build-configurations=$configsJson"
-          Write-Host "release-configurations=$releaseConfigsJson"
-          
-          echo "build-configurations=$configsJson" >> $env:GITHUB_OUTPUT
-          echo "release-configurations=$releaseConfigsJson" >> $env:GITHUB_OUTPUT
-        shell: pwsh
+          echo "build-configurations=[$configs]" >> $GITHUB_OUTPUT
+          echo "release-configurations=[$release_configs]" >> $GITHUB_OUTPUT
+        shell: bash
 
 
 
       - name: Parse dependencies
         id: parse-deps
         run: |
-          if (Test-Path "dependencies.txt") {
-            $deps = Get-Content "dependencies.txt" | Where-Object { $_.Trim() -and !$_.StartsWith("#") } | ConvertTo-Json -Compress
-            echo "dependencies=$deps" >> $env:GITHUB_OUTPUT
-          } else {
-            echo "dependencies=[]" >> $env:GITHUB_OUTPUT
-          }
-        shell: pwsh
+          if [ -f "dependencies.txt" ]; then
+            deps=$(grep -v '^#' dependencies.txt | grep -v '^[[:space:]]*$' | jq -R . | jq -s -c .)
+            echo "dependencies=$deps" >> $GITHUB_OUTPUT
+          else
+            echo "dependencies=[]" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
 
       - name: Get changed files
         id: get-changed-files
         run: |
-          $branchName = '${{ inputs.branch_name }}'
-          Write-Host "Current branch: $branchName"
+          branch_name='${{ inputs.branch_name }}'
+          echo "Current branch: $branch_name"
           
-          if ($branchName -eq 'develop') {
-            Write-Host "Running on develop branch - no changed files to track"
-            echo "changed-files=" >> $env:GITHUB_OUTPUT
-          } else {
-            Write-Host "Getting list of changed files compared to develop..."
+          if [ "$branch_name" = "develop" ]; then
+            echo "Running on develop branch - no changed files to track"
+            echo "changed-files=" >> $GITHUB_OUTPUT
+          else
+            echo "Getting list of changed files compared to develop..."
             
             # Fetch develop branch for comparison
-            try {
-              Write-Host "Fetching develop branch..."
-              git fetch origin develop:develop 2>&1 | Write-Host
-              
-              if ($LASTEXITCODE -eq 0) {
-                Write-Host "Successfully fetched develop branch, comparing files..."
+            if git fetch origin develop:develop 2>/dev/null; then
+              echo "Successfully fetched develop branch, comparing files..."
                 
                 # Debug: Show current commit and develop commit
-                $currentCommit = git rev-parse HEAD
-                $developCommit = git rev-parse develop
-                Write-Host "Current commit: $currentCommit"
-                Write-Host "Develop commit: $developCommit"
+              current_commit=$(git rev-parse HEAD)
+              develop_commit=$(git rev-parse develop)
+              echo "Current commit: $current_commit"
+              echo "Develop commit: $develop_commit"
+              
+              # Compare current branch (HEAD) with develop
+              changed_files=$(git diff --name-only --diff-filter=ACMRT develop HEAD 2>/dev/null || true)
+              
+              if [ -n "$changed_files" ]; then
+                echo "Found changed files (excluding deletions):"
+                echo "$changed_files" | head -5
+                file_count=$(echo "$changed_files" | wc -l)
+                if [ $file_count -gt 5 ]; then
+                  echo "... and $((file_count - 5)) more files"
+                fi
                 
-                # Compare current branch (HEAD) with develop using two-dot syntax
-                # Include all changes except deleted files (A=added, C=copied, M=modified, R=renamed, T=type changed)
-                Write-Host "Comparing current branch with develop branch (excluding deleted files only)..."
-                $changedFiles = git diff --name-only --diff-filter=ACMRT develop HEAD 2>&1
-                $gitDiffExitCode = $LASTEXITCODE
-                
-                Write-Host "Git diff exit code: $gitDiffExitCode"
-                if ($changedFiles) {
-                  Write-Host "Found $($changedFiles.Count) changed files (excluding deletions)"
-                  # Show first few files for debugging
-                  $displayCount = [Math]::Min(5, $changedFiles.Count)
-                  Write-Host "First $displayCount files:"
-                  for ($i = 0; $i -lt $displayCount; $i++) {
-                    Write-Host "  $($changedFiles[$i])"
-                  }
-                  if ($changedFiles.Count -gt 5) {
-                    Write-Host "  ... and $($changedFiles.Count - 5) more files"
-                  }
-                } else {
-                  Write-Host "No files returned from git diff"
-                }
-                
-                # Reset exit code for this step
-                $LASTEXITCODE = 0
-                
-                if ($gitDiffExitCode -eq 0) {
-                  if ($changedFiles -and $changedFiles.Count -gt 0) {
                     # Convert to full paths and join with semicolons
-                    $fullPaths = @()
-                    foreach ($file in $changedFiles) {
-                      if ($file -and $file.Trim()) {
-                        $fullPath = Join-Path (Get-Location) $file.Trim()
-                        $fullPaths += $fullPath
-                      }
-                    }
-                    
-                    if ($fullPaths.Count -gt 0) {
-                      $changedFilesString = $fullPaths -join ';'
-                      Write-Host "Changed files ($($fullPaths.Count)) - excluding deletions:"
-                      foreach ($file in $fullPaths) {
-                        Write-Host "  $file"
-                      }
-                      echo "changed-files=$changedFilesString" >> $env:GITHUB_OUTPUT
-                    } else {
-                      Write-Host "No valid changed files detected after filtering"
-                      echo "changed-files=" >> $env:GITHUB_OUTPUT
-                    }
-                  } else {
-                    Write-Host "No changes found compared to develop branch (this is normal)"
-                    echo "changed-files=" >> $env:GITHUB_OUTPUT
-                  }
-                } else {
-                  Write-Host "Git diff returned exit code $gitDiffExitCode, treating as no changes"
-                  echo "changed-files=" >> $env:GITHUB_OUTPUT
-                }
-              } else {
-                Write-Host "⚠ Could not fetch develop branch, skipping changed files detection" -ForegroundColor Yellow
-                echo "changed-files=" >> $env:GITHUB_OUTPUT
-              }
-            } catch {
-              Write-Host "⚠ Error during git operations: $($_.Exception.Message)" -ForegroundColor Yellow
-              Write-Host "Skipping changed files detection"
-              echo "changed-files=" >> $env:GITHUB_OUTPUT
-            }
-            
-            # Ensure step always succeeds
-            $LASTEXITCODE = 0
-          }
-        shell: pwsh
-
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-      
-      - name: Setup NuGet.exe for use with actions
-        uses: NuGet/setup-nuget@v2.0.1
+                full_paths=""
+                while IFS= read -r file; do
+                  if [ -n "$file" ]; then
+                    full_path="$(pwd)/$file"
+                    if [ -n "$full_paths" ]; then
+                      full_paths="$full_paths;$full_path"
+                    else
+                      full_paths="$full_path"
+                    fi
+                  fi
+                done <<< "$changed_files"
+                
+                echo "changed-files=$full_paths" >> $GITHUB_OUTPUT
+              else
+                echo "No changes found compared to develop branch (this is normal)"
+                echo "changed-files=" >> $GITHUB_OUTPUT
+              fi
+            else
+              echo "⚠ Could not fetch develop branch, skipping changed files detection"
+              echo "changed-files=" >> $GITHUB_OUTPUT
+            fi
+          fi
+        shell: bash
 
       - name: Create BHoM folder
-        run: New-Item -ItemType Directory -Force -Path "$env:BHoMFolder\Assemblies" | Out-Null
-        shell: pwsh
+        run: mkdir -p "$BHoMFolder/Assemblies"
+        shell: bash
 
       - name: Check GitHub App secrets
         id: check-app-secrets
@@ -272,228 +222,296 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.GH_TOKEN || github.token }}
         run: |
-          $dependencies = '${{ steps.parse-deps.outputs.dependencies }}' | ConvertFrom-Json
-          $branch_name = '${{ inputs.branch_name }}'
-          $branchMap = @{}
+          dependencies='${{ steps.parse-deps.outputs.dependencies }}'
+          branch_name='${{ inputs.branch_name }}'
           
-          Write-Host "Determining branches for dependencies..."
-          Write-Host "Target branch: $branch_name"
+          echo "Determining branches for dependencies..."
+          echo "Target branch: $branch_name"
           
-          # URL encode the branch name for API calls (handles special characters like #)
-          $encodedBranchName = [System.Web.HttpUtility]::UrlEncode($branch_name)
-
-          foreach ($dep in $dependencies) {
-            Write-Host "Checking branch availability for $dep"
+          # URL encode the branch name for API calls
+          encoded_branch_name=$(printf '%s' "$branch_name" | jq -sRr @uri)
+          
+          branch_map="{}"
+          
+          if [ "$dependencies" != "[]" ] && [ "$dependencies" != "null" ]; then
+            for dep in $(echo "$dependencies" | jq -r '.[]'); do
+              echo "Checking branch availability for $dep"
 
             # Check if target branch exists in the dependency repo
-            $branchExists = $false
-            try {
-              $branchResult = gh api "/repos/$dep/branches/$encodedBranchName" 2>$null
-              if ($LASTEXITCODE -eq 0 -and $branchResult) {
-                $branchExists = $true
-                Write-Host "  ✓ Branch '$branch_name' exists"
-              }
-            } catch {
-              # Branch doesn't exist or no access
-            }
-            
-            # Reset exit code to prevent step failure
-            $LASTEXITCODE = 0
-            
-            if ($branchExists) {
-              $branchMap[$dep] = $branch_name
-            } else {
-              $branchMap[$dep] = "develop"
-              Write-Host "  → Falling back to 'develop' branch"
-            }
-          }
+              if gh api "/repos/$dep/branches/$encoded_branch_name" >/dev/null 2>&1; then
+                echo "  ✓ Branch '$branch_name' exists"
+                branch_map=$(echo "$branch_map" | jq --arg dep "$dep" --arg branch "$branch_name" '. + {($dep): $branch}')
+              else
+                echo "  → Falling back to 'develop' branch"
+                branch_map=$(echo "$branch_map" | jq --arg dep "$dep" '. + {($dep): "develop"}')
+              fi
+            done
+          fi
           
-          # Display final branch mapping
-          Write-Host "`nBranch mapping for dependencies:"
-          foreach ($dep in $dependencies) {
-            Write-Host "  $dep → $($branchMap[$dep])"
-          }
+          echo -e "\nBranch mapping for dependencies:"
+          echo "$branch_map" | jq -r 'to_entries[] | "  \(.key) → \(.value)"'
           
-          # Convert to JSON for use in subsequent steps
-          $branchMapJson = $branchMap | ConvertTo-Json -Compress
-          echo "branch-map=$branchMapJson" >> $env:GITHUB_OUTPUT
-          
-          # Ensure step always succeeds
-          $LASTEXITCODE = 0
-        shell: pwsh
+          echo "branch-map=$(echo "$branch_map" | jq -c .)" >> $GITHUB_OUTPUT
+        shell: bash
 
       - name: Download dependency artifacts
         id: download-deps
         env:
           GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.GH_TOKEN || github.token }}
         run: |
-          $dependencies = '${{ steps.parse-deps.outputs.dependencies }}' | ConvertFrom-Json
-          $branchMap = '${{ steps.determine-branches.outputs.branch-map }}' | ConvertFrom-Json
-          $downloaded_artifacts = @()
+          dependencies='${{ steps.parse-deps.outputs.dependencies }}'
+          branch_map='${{ steps.determine-branches.outputs.branch-map }}'
+          downloaded_artifacts="[]"
+          missing_dependencies="[]"
           
           # Determine authentication method
-          if ('${{ steps.generate-token.outputs.token }}' -ne '') {
-            Write-Host "Using GitHub App authentication"
-          } elseif ('${{ secrets.GH_TOKEN }}' -ne '') {
-            Write-Host "Using provided token"
-          } else {
-            Write-Host "Using default GITHUB_TOKEN"
-          }
+          if [ -n '${{ steps.generate-token.outputs.token }}' ]; then
+            echo "Using GitHub App authentication"
+          elif [ -n '${{ secrets.GH_TOKEN }}' ]; then
+            echo "Using provided token"
+          else
+            echo "Using default GITHUB_TOKEN"
+          fi
           
-          Write-Host "Downloading artifacts using pre-determined branches..."
+          echo "Downloading artifacts using pre-determined branches..."
           
-          if ($dependencies.Count -gt 0) {
-            foreach ($dep in $dependencies) {
-              $target_branch = $branchMap.$dep
-              Write-Host "Processing dependency: $dep (branch: $target_branch)"
+          if [ "$dependencies" != "[]" ] && [ "$dependencies" != "null" ]; then
+            for dep in $(echo "$dependencies" | jq -r '.[]'); do
+              target_branch=$(echo "$branch_map" | jq -r --arg dep "$dep" '.[$dep]')
+              echo "Processing dependency: $dep (branch: $target_branch)"
               
-              # Get latest run of the BHoM Build Workflow for the target branch (regardless of status)
-              $runsResponse = gh api "/repos/$dep/actions/runs?per_page=50" 2>$null
-              if ($LASTEXITCODE -ne 0) {
-                Write-Host "No access to $dep on $target_branch - will need to build"
+              # Get latest run of the BHoM Build Workflow for the target branch
+              if ! runs_response=$(gh api "/repos/$dep/actions/runs?per_page=50" 2>/dev/null); then
+                echo "No access to $dep on $target_branch - will need to build"
+                missing_dependencies=$(echo "$missing_dependencies" | jq --arg dep "$dep" '. + [$dep]')
                 continue
-              }
+              fi
               
-              $runs = $runsResponse | ConvertFrom-Json
-              $workflowRuns = $runs.workflow_runs | Where-Object { 
-                $_.head_branch -eq $target_branch -and $_.name -eq "CI Build and Test"
-              }
+              # Find CI Build and Test workflow runs
+              workflow_runs=$(echo "$runs_response" | jq -r --arg branch "$target_branch" '.workflow_runs[] | select(.head_branch == $branch and .name == "CI Build and Test") | .id' | head -1)
               
-              if (-not $workflowRuns -or $workflowRuns.Count -eq 0) {
-                Write-Host "No CI Build and Test workflow runs found for $dep on $target_branch - will need to build"
+              if [ -z "$workflow_runs" ]; then
+                echo "No CI Build and Test workflow runs found for $dep on $target_branch - will need to build"
+                missing_dependencies=$(echo "$missing_dependencies" | jq --arg dep "$dep" '. + [$dep]')
                 continue
-              }
+              fi
               
-              $latestRun = $workflowRuns[0]
-              $run_id = $latestRun.id
-              Write-Host "Found latest CI Build and Test workflow run: $run_id for $dep on $target_branch (status: $($latestRun.status), conclusion: $($latestRun.conclusion))"
+              run_id="$workflow_runs"
+              echo "Found latest CI Build and Test workflow run: $run_id for $dep on $target_branch"
               
               # Get Release configurations to try
-              $releaseConfigs = '${{ steps.discover-configs.outputs.release-configurations }}' | ConvertFrom-Json
-              if ($releaseConfigs.Count -eq 0) { $releaseConfigs = @("Release") }
+              release_configs='${{ steps.discover-configs.outputs.release-configurations }}'
+              if [ "$release_configs" = "[]" ] || [ "$release_configs" = "null" ]; then
+                release_configs='["Release"]'
+              fi
               
-              $found = $false
-              $waitAttempts = 0
-              $maxWaitAttempts = 10
+              found=false
+              wait_attempts=0
+              max_wait_attempts=10
               
               # Check for artifacts, even if workflow is still running
-              while ($waitAttempts -le $maxWaitAttempts -and -not $found) {
-                if ($waitAttempts -gt 0) {
-                  Write-Host "Wait attempt $waitAttempts/$maxWaitAttempts - checking for artifacts..."
-                  Start-Sleep -Seconds 10
-                }
-                
-                # Check run status and artifacts
-                if ($waitAttempts -gt 0) {
-                  $runStatusResponse = gh api "/repos/$dep/actions/runs/$run_id" 2>$null
-                  if ($runStatusResponse) {
-                    $latestRun = $runStatusResponse | ConvertFrom-Json
-                    Write-Host "Run status: $($latestRun.status), conclusion: $($latestRun.conclusion)"
-                  }
-                }
+              while [ $wait_attempts -le $max_wait_attempts ] && [ "$found" = "false" ]; do
+                if [ $wait_attempts -gt 0 ]; then
+                  echo "Wait attempt $wait_attempts/$max_wait_attempts - checking for artifacts..."
+                  sleep 10
+                fi
                 
                 # Check if artifacts are available
-                $artifactsResponse = gh api "/repos/$dep/actions/runs/$run_id/artifacts" 2>$null
-                if ($artifactsResponse) {
-                  $allArtifacts = $artifactsResponse | ConvertFrom-Json
+                if artifacts_response=$(gh api "/repos/$dep/actions/runs/$run_id/artifacts" 2>/dev/null); then
+                  artifact_count=$(echo "$artifacts_response" | jq '.artifacts | length')
                   
-                  if ($allArtifacts.artifacts -and $allArtifacts.artifacts.Count -gt 0) {
-                    Write-Host "Run has $($allArtifacts.artifacts.Count) artifacts available"
+                  if [ "$artifact_count" -gt 0 ]; then
+                    echo "Run has $artifact_count artifacts available"
                     
                     # Look for the specific artifacts we need
-              foreach ($releaseConfig in $releaseConfigs) {
-                $artifact_name = "build-outputs-$target_branch-$releaseConfig"
-                Write-Host "Looking for artifact: $artifact_name"
-                
-                      $targetArtifact = $allArtifacts.artifacts | Where-Object { $_.name -eq $artifact_name }
-                
-                      if ($targetArtifact) {
-                        Write-Host "✓ Found artifact: $artifact_name from $dep"
-                  $dep_safe = $dep.Replace('/', '_')
-                  
-                  # Download and extract
-                        gh api "/repos/$dep/actions/artifacts/$($targetArtifact.id)/zip" > "${dep_safe}_artifact.zip"
-                  New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
-                  Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
-                  
-                  # Copy to BHoM folder
-                  if (Test-Path "dependencies\$dep_safe") {
-                    Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
-                  }
-                  
-                  Write-Host "✓ Successfully downloaded artifact for $dep for configuration $releaseConfig"
-                  $found = $true
+                    for release_config in $(echo "$release_configs" | jq -r '.[]'); do
+                      artifact_name="build-outputs-$target_branch-$release_config"
+                      echo "Looking for artifact: $artifact_name"
+                      
+                      artifact_id=$(echo "$artifacts_response" | jq -r --arg name "$artifact_name" '.artifacts[] | select(.name == $name) | .id')
+                      
+                      if [ -n "$artifact_id" ] && [ "$artifact_id" != "null" ]; then
+                        echo "✓ Found artifact: $artifact_name from $dep"
+                        dep_safe=$(echo "$dep" | tr '/' '_')
+                        
+                        # Download and extract
+                        gh api "/repos/$dep/actions/artifacts/$artifact_id/zip" > "${dep_safe}_artifact.zip"
+                        mkdir -p "dependencies/$dep_safe"
+                        unzip -q "${dep_safe}_artifact.zip" -d "dependencies/$dep_safe"
+                        
+                        # Copy to BHoM folder
+                        if [ -d "dependencies/$dep_safe" ]; then
+                          cp -r dependencies/$dep_safe/* "$BHoMFolder/" 2>/dev/null || true
+                        fi
+                        
+                        echo "✓ Successfully downloaded artifact for $dep for configuration $release_config"
+                        downloaded_artifacts=$(echo "$downloaded_artifacts" | jq --arg dep "$dep" '. + [$dep]')
+                        found=true
                         break
-                      }
-                    }
+                      fi
+                    done
                     
-                    if ($found) {
+                    if [ "$found" = "true" ]; then
+                        break
+                    fi
+                  fi
+                fi
+                
+                # Check if workflow is completed
+                if run_status=$(gh api "/repos/$dep/actions/runs/$run_id" 2>/dev/null); then
+                  status=$(echo "$run_status" | jq -r '.status')
+                  if [ "$status" = "completed" ] && [ "$found" = "false" ]; then
+                    echo "✗ No suitable artifacts found for $dep - will need to build"
+                    missing_dependencies=$(echo "$missing_dependencies" | jq --arg dep "$dep" '. + [$dep]')
                       break
-                    }
-                  }
-                }
-                
-                # If workflow is completed and we still haven't found artifacts, exit with error
-                if ($latestRun.status -eq "completed" -and -not $found) {
-                  if ($allArtifacts.artifacts -and $allArtifacts.artifacts.Count -gt 0) {
-                    Write-Host "Available artifacts in run ${run_id}:"
-                    foreach ($art in $allArtifacts.artifacts) {
-                      Write-Host "  - $($art.name)"
-                    }
-                    Write-Host "✗ CRITICAL ERROR: Expected artifact not found for dependency $dep" -ForegroundColor Red
-                    Write-Host "Expected artifacts matching pattern: build-outputs-$target_branch-[Release configs]" -ForegroundColor Red
-                  } else {
-                    Write-Host "✗ CRITICAL ERROR: Completed run $run_id has no artifacts for dependency $dep" -ForegroundColor Red
-                    Write-Host "This indicates the dependency build failed or did not produce expected outputs." -ForegroundColor Red
-                  }
-                  exit 1
-                }
-                
-                # If workflow is still running, continue waiting
-                if ($latestRun.status -eq "in_progress" -or $latestRun.status -eq "queued") {
-                  if ($waitAttempts -eq 0) {
-                    Write-Host "Run $run_id is still running, will check for artifacts while waiting..."
-                  }
-                  $waitAttempts++
-                } else {
-                  # Workflow completed but no artifacts found
+                  elif [ "$status" = "in_progress" ] || [ "$status" = "queued" ]; then
+                    if [ $wait_attempts -eq 0 ]; then
+                      echo "Run $run_id is still running, will check for artifacts while waiting..."
+                    fi
+                    wait_attempts=$((wait_attempts + 1))
+                  else
+                    break
+                  fi
+                else
                   break
-                }
-              }
+                fi
+              done
               
-              if ($found) {
-                $downloaded_artifacts += $dep
-                Write-Host "✓ Completed artifact downloads for $dep"
-              } else {
-                if ($waitAttempts -gt $maxWaitAttempts) {
-                  Write-Host "✗ Run did not complete or produce artifacts after $maxWaitAttempts wait attempts - will need to build"
-                } else {
-                  Write-Host "✗ No suitable artifacts found for $dep - will need to build"
-                }
-              }
-            }
-          }
+              if [ "$found" = "true" ]; then
+                echo "✓ Completed artifact downloads for $dep"
+              else
+                if [ $wait_attempts -gt $max_wait_attempts ]; then
+                  echo "✗ Run did not complete or produce artifacts after $max_wait_attempts wait attempts - will need to build"
+                  missing_dependencies=$(echo "$missing_dependencies" | jq --arg dep "$dep" '. + [$dep]')
+                else
+                  echo "✗ No suitable artifacts found for $dep - will need to build"
+                  missing_dependencies=$(echo "$missing_dependencies" | jq --arg dep "$dep" '. + [$dep]')
+                fi
+              fi
+            done
+          fi
           
           # Output results
-          $downloaded_string = $downloaded_artifacts -join ","
-          echo "artifacts-downloaded=$downloaded_string" >> $env:GITHUB_OUTPUT
-          Write-Host "✓ Artifact resolution completed. Downloaded: $($downloaded_artifacts.Count) dependencies"
+          downloaded_count=$(echo "$downloaded_artifacts" | jq 'length')
+          missing_count=$(echo "$missing_dependencies" | jq 'length')
+          echo "artifacts-downloaded=$(echo "$downloaded_artifacts" | jq -r 'join(",")')" >> $GITHUB_OUTPUT
+          echo "missing-dependencies=$(echo "$missing_dependencies" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "✓ Artifact resolution completed. Downloaded: $downloaded_count dependencies, Missing: $missing_count dependencies"
+        shell: bash
+
+      - name: Upload dependencies artifact
+        id: build-summary
+        run: |
+          missing_count=$(echo '${{ steps.download-deps.outputs.missing-dependencies }}' | jq 'length')
+          
+          if [ "$missing_count" -gt 0 ]; then
+            echo "dependencies-built=incomplete" >> $GITHUB_OUTPUT
+            echo "Some dependencies missing artifacts - marking as incomplete"
+          else
+            echo "dependencies-built=complete" >> $GITHUB_OUTPUT
+            echo "All dependencies have artifacts - marking as complete"
+          fi
+        shell: bash
+
+      - name: Create status files for artifact
+        if: always()
+        run: |
+          # Create status files in BHoM folder
+          echo '${{ steps.build-summary.outputs.dependencies-built }}' > "$BHoMFolder/status.txt"
+          echo '${{ steps.download-deps.outputs.missing-dependencies }}' > "$BHoMFolder/missing-dependencies.json"
+        shell: bash
+
+      - name: Upload complete dependencies artifact
+        if: steps.build-summary.outputs.dependencies-built == 'complete'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dependencies
+          path: ${{ env.BHoMFolder }}
+          retention-days: 3
+          compression-level: 6
+
+      - name: Upload incomplete dependencies artifact
+        if: steps.build-summary.outputs.dependencies-built == 'incomplete'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dependencies-Incomplete
+          path: ${{ env.BHoMFolder }}
+          retention-days: 3
+          compression-level: 6
+
+  build-dependencies-with-no-artifacts:
+    runs-on: windows-latest
+    needs: setup-configurations-and-dependencies
+    if: needs.setup-configurations-and-dependencies.outputs.dependencies-built == 'incomplete'
+    outputs:
+      dependencies-built: ${{ steps.final-build-summary.outputs.dependencies-built }}
+    env:
+      BHoMFolder: "C:\\ProgramData\\BHoM"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      
+      - name: Setup NuGet.exe for use with actions
+        uses: NuGet/setup-nuget@v2.0.1
+
+      - name: Create BHoM folder
+        run: New-Item -ItemType Directory -Force -Path "$env:BHoMFolder\Assemblies" | Out-Null
         shell: pwsh
+
+      - name: Download incomplete dependencies artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Dependencies-Incomplete
+          path: ${{ env.BHoMFolder }}
+
+      - name: Get missing dependencies list
+        id: get-missing-deps
+        run: |
+          $missingDeps = Get-Content "$env:BHoMFolder\missing-dependencies.json" | ConvertFrom-Json
+          $missingDepsString = $missingDeps -join ","
+          echo "missing-deps=$missingDepsString" >> $env:GITHUB_OUTPUT
+          Write-Host "Missing dependencies: $missingDepsString"
+        shell: pwsh
+
+      - name: Check GitHub App secrets
+        id: check-app-secrets
+        run: |
+          if [ -n "${{ secrets.APP_ID }}" ] && [ -n "${{ secrets.APP_PRIVATE_KEY }}" ]; then
+            echo "app-secrets-available=true" >> $GITHUB_OUTPUT
+          else
+            echo "app-secrets-available=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Generate GitHub App Token
+        id: generate-token
+        if: steps.check-app-secrets.outputs.app-secrets-available == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
 
       - name: Clone missing dependencies
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.GH_TOKEN || github.token }}
         run: |
-          $dependencies = '${{ steps.parse-deps.outputs.dependencies }}' | ConvertFrom-Json
-          $downloaded = '${{ steps.download-deps.outputs.artifacts-downloaded }}' -split ',' | Where-Object { $_ -ne "" }
-          $branchMap = '${{ steps.determine-branches.outputs.branch-map }}' | ConvertFrom-Json
+          $missingDeps = '${{ steps.get-missing-deps.outputs.missing-deps }}' -split ',' | Where-Object { $_ -ne "" }
+          $branchMap = '${{ needs.setup-configurations-and-dependencies.outputs.branch-map }}' | ConvertFrom-Json
+          
+          if ($missingDeps.Count -eq 0) {
+            Write-Host "No missing dependencies to clone"
+            exit 0
+          }
           
           # Create repositories directory
           New-Item -ItemType Directory -Force -Path "Repositories"
           
           # Process only missing dependencies
-          foreach ($dep in $dependencies) {
-            if ($downloaded -notcontains $dep) {
+          foreach ($dep in $missingDeps) {
               $target_branch = $branchMap.$dep
               Write-Host "Processing missing dependency: $dep (branch: $target_branch)"
               
@@ -794,7 +812,7 @@ jobs:
         shell: pwsh
 
       - name: Upload dependencies artifact
-        id: build-summary
+        id: final-build-summary
         run: |
           # Create dependencies artifact from BHoM folder
           if (Test-Path "$env:BHoMFolder") {
@@ -817,7 +835,7 @@ jobs:
         shell: pwsh
 
       - name: Upload dependencies artifact
-        if: steps.build-summary.outputs.dependencies-built == 'true'
+        if: steps.final-build-summary.outputs.dependencies-built == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: Dependencies
@@ -827,11 +845,12 @@ jobs:
 
   build:
     runs-on: windows-latest
-    needs: prepare-dependencies
+    needs: [setup-configurations-and-dependencies, build-dependencies-with-no-artifacts]
+    if: always() && (needs.setup-configurations-and-dependencies.result == 'success')
     strategy:
       fail-fast: false
       matrix:
-        build-configuration: ${{ fromJson(needs.prepare-dependencies.outputs.build-configurations) }}
+        build-configuration: ${{ fromJson(needs.setup-configurations-and-dependencies.outputs.build-configurations) }}
     env:
       BHoMFolder: "C:\\ProgramData\\BHoM"
     steps:
@@ -849,7 +868,7 @@ jobs:
         shell: pwsh
 
       - name: Download dependencies
-        if: needs.prepare-dependencies.outputs.dependencies-built == 'true'
+        if: needs.setup-configurations-and-dependencies.outputs.dependencies-built == 'complete' || needs.build-dependencies-with-no-artifacts.outputs.dependencies-built == 'true'
         uses: actions/download-artifact@v4
         with:
           name: Dependencies
@@ -1104,7 +1123,7 @@ jobs:
           compression-level: 6
 
       - name: Upload BHoM Assemblies
-        if: contains(fromJson(needs.prepare-dependencies.outputs.release-configurations), matrix.build-configuration)
+        if: contains(fromJson(needs.setup-configurations-and-dependencies.outputs.release-configurations), matrix.build-configuration)
         uses: actions/upload-artifact@v4
         with:
           name: bhom-assemblies-${{ matrix.build-configuration }}
@@ -1114,7 +1133,7 @@ jobs:
 
   tests:
     runs-on: windows-latest
-    needs: [prepare-dependencies, build]
+    needs: [setup-configurations-and-dependencies, build-dependencies-with-no-artifacts, build]
     env:
       BHoMFolder: "C:\\ProgramData\\BHoM"
     steps:
@@ -1445,7 +1464,7 @@ jobs:
           
           # Find all updated-assemblies-*.txt files from release builds
           $updatedAssembliesFiles = Get-ChildItem "$env:BHoMFolder" -Filter "updated-assemblies-*.txt" -File
-          $changedFiles = '${{ needs.prepare-dependencies.outputs.changed-files }}'
+          $changedFiles = '${{ needs.setup-configurations-and-dependencies.outputs.changed-files }}'
           
           $overallSuccess = $true
           $testResults = @()
