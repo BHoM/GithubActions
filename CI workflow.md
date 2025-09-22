@@ -12,62 +12,78 @@ graph TD
     
     **Triggers:** workflow_call
     **Inputs:** repository_name, branch_name, dotnet_version
-    **Concurrency:** Cancel in-progress runs on new commits`"] --> B["`**📦 Job 1: prepare-dependencies**
-    **Purpose:** Setup all dependencies and test files
-    **Duration:** ~2-5 minutes
-    **Runs on:** windows-latest
+    **Concurrency:** Cancel in-progress runs on new commits`"] --> B["`**📋 Job 1: setup-configurations-and-dependencies**
+    **Purpose:** Setup configs and download available dependencies
+    **Duration:** ~2-3 minutes
+    **Runs on:** ubuntu-latest
     
     📋 **See Detailed Diagram 2**`"]
     
-    B --> C["`**🔨 Job 2: build (Matrix)**
+    B --> C{"`**Missing dependencies?**`"}
+    C -->|Yes| D["`**🔨 Job 2: build-dependencies-with-no-artifacts**
+    **Purpose:** Build missing dependencies only
+    **Duration:** ~5-15 minutes (conditional)
+    **Runs on:** windows-latest
+    
+    📋 **See Detailed Diagram 3**`"]
+    C -->|No| E["`**Skip dependency building**`"]
+    
+    D --> F["`**🔨 Job 3: build (Matrix)**
     **Purpose:** Build project for each configuration
     **Matrix:** build-configuration (Debug, Release, etc.)
     **Duration:** ~3-10 minutes per config
     **Runs on:** windows-latest
     
+    📋 **See Detailed Diagram 4**`"]
+    E --> F
+    
+    F --> G["`**🧪 Job 4: tests**
+    **Purpose:** Run tests and generate reports
+    **Duration:** ~2-5 minutes
+    **Runs on:** windows-latest
+    
     📋 **See Detailed Diagram 5**`"]
-    
-    C --> D["`**📊 Job 3: test-report (Matrix)**
-    **Purpose:** Generate test reports for GitHub
-    **Matrix:** test-dll (each test library)
-    **Duration:** ~30 seconds per DLL
-    **Runs on:** ubuntu-latest
-    
-    📋 **See Detailed Diagram 6**`"]
     
     B -.->|"`**Artifacts & Outputs:**
     • build-configurations
     • release-configurations  
-    • dependencies-built
+    • dependencies-built (complete/incomplete)
     • changed-files
-    • Dependencies (artifact)
-    • Test-Toolkit-Tests (artifact)`"| C
+    • missing-dependencies
+    • branch-map
+    • Dependencies or Dependencies-Incomplete`"| C
     
-    C -.->|"`**Artifacts & Outputs:**
-    • test-dll-names
+    D -.->|"`**Artifacts & Outputs:**
+    • dependencies-built (true/false)
+    • Dependencies (complete set)`"| F
+    
+    F -.->|"`**Artifacts & Outputs:**
     • build-outputs-$branch-$config
-    • test-results-$config`"| D
+    • bhom-assemblies-$config
+    • updated-assemblies-$config.txt`"| G
     
-    E["`**🔍 Key Sub-processes:**
+    H["`**🔍 Key Features:**
     
-    **Diagram 3:** Dependency Artifact Download
-    **Diagram 4:** Test Toolkit Tests Download
+    **Cross-Platform Optimization:** Ubuntu for config discovery
+    **Conditional Building:** Only build missing dependencies
+    **Priority-Based Downloads:** Matching configs → Release fallback
+    **Path Handling:** Ubuntu→Windows compatibility
     
     **⚠️ Critical Error Conditions:**
-    • Missing expected dependency artifacts → EXIT 1
     • Build failures → EXIT 1  
     • No test DLLs found → EXIT 1
     • Test failures → EXIT 1`"]
     
-    F["`**📈 Performance Optimizations:**
+    I["`**📈 Performance Optimizations:**
     
+    • **Ubuntu first job** - faster, cheaper for configs
+    • **Conditional Windows job** - only when needed
+    • **Artifact priority system** - matching configs first
+    • **Path conversion** - cross-platform compatibility
     • **Parallel artifact checking** while workflows run
-    • **Matrix builds** for multiple configurations
-    • **Artifact caching** to avoid rebuilding dependencies
-    • **Early termination** on critical errors
-    • **Concurrency control** to cancel outdated runs`"]
+    • **Matrix builds** for multiple configurations`"]
     
-    G["`**🔧 Authentication & Access:**
+    J["`**🔧 Authentication & Access:**
     
     • **GitHub App authentication** (preferred)
     • **Personal Access Token** fallback
@@ -75,180 +91,237 @@ graph TD
     • **Cross-repository access** for dependencies`"]
     
     style A fill:#e3f2fd
-    style B fill:#f3e5f5
-    style C fill:#e8f5e8
-    style D fill:#fff3e0
-    style E fill:#fce4ec
-    style F fill:#e0f2f1
-    style G fill:#f1f8e9
+    style B fill:#e8f5e8
+    style C fill:#ffecb3
+    style D fill:#f3e5f5
+    style E fill:#e0f2f1
+    style F fill:#fff3e0
+    style G fill:#fce4ec
+    style H fill:#f1f8e9
+    style I fill:#e0f2f1
+    style J fill:#f1f8e9
 ```
 
 ---
 
-## Tab 2: prepare-dependencies Job Detail
+## Tab 2: setup-configurations-and-dependencies Job Detail
 
 ```mermaid
 graph TD
-    A["`**prepare-dependencies Job**`"] --> B["`**Discover Build Configurations**
-    • Parse .sln file
+    A["`**setup-configurations-and-dependencies Job**
+    Runs on: ubuntu-latest`"] --> B["`**Discover Build Configurations**
+    • Parse .sln file (bash)
     • Extract build configs
-    • Identify Release configs`"]
+    • Identify Release configs
+    • Output JSON arrays`"]
     
     B --> C["`**Parse Dependencies**
-    • Read dependencies.txt
-    • Extract dependency list`"]
+    • Read dependencies.txt (bash)
+    • Extract dependency list
+    • Convert to JSON`"]
     
     C --> D["`**Get Changed Files**
     Compare with develop branch`"]
     
     D --> E{"`**Branch = develop?**`"}
     E -->|Yes| F["`**No changed files tracking**`"]
-    E -->|No| G["`**Git diff vs develop**
+    E -->|No| G["`**Git diff vs develop (bash)**
     • Fetch develop branch
     • Compare files
-    • Generate file list`"]
+    • Generate RELATIVE paths (cross-platform)`"]
     
-    F --> H["`**Setup Authentication**
-    • Check GitHub App secrets
-    • Generate token if available`"]
+    F --> H["`**Create BHoM folder**
+    mkdir -p /tmp/BHoM/Assemblies`"]
     G --> H
     
-    H --> I["`**Determine Dependency Branches**
+    H --> I["`**Setup Authentication**
+    • Check GitHub App secrets
+    • Generate token if available`"]
+    
+    I --> J["`**Determine Dependency Branches**
     For each dependency:`"]
-    I --> J{"`**Target branch exists?**`"}
-    J -->|Yes| K["`**Use target branch**`"]
-    J -->|No| L["`**Use develop branch**`"]
+    J --> K{"`**Target branch exists?**`"}
+    K -->|Yes| L["`**Use target branch**`"]
+    K -->|No| M["`**Use develop branch**`"]
     
-    K --> M["`**Download Dependency Artifacts**
-    See detailed diagram`"]
-    L --> M
+    L --> N["`**Download Dependency Artifacts**
+    Priority-based download system`"]
+    M --> N
     
-    M --> N{"`**Artifacts found?**`"}
-    N -->|Yes| O["`**Extract to BHoM folder**`"]
-    N -->|No| P["`**Clone Missing Dependencies**
-    See detailed diagram`"]
+    N --> O{"`**All dependencies found?**`"}
+    O -->|Yes| P["`**Mark as 'complete'**
+    dependencies-built=complete`"]
+    O -->|No| Q["`**Mark as 'incomplete'**
+    dependencies-built=incomplete
+    Track missing dependencies`"]
     
-    O --> Q["`**Download Test Toolkit Tests**
-    See detailed diagram`"]
-    P --> R["`**Build Missing Dependencies**
-    • Analyze dependency order
-    • Topological sort
-    • Build in correct order`"]
+    P --> R["`**Upload Dependencies artifact**
+    Complete dependency set`"]
+    Q --> S["`**Upload Dependencies-Incomplete artifact**
+    Partial dependency set + missing list`"]
     
-    R --> Q
-    Q --> S["`**Upload Artifacts**
-    • Dependencies (if built)
-    • Test-Toolkit-Tests`"]
+    R --> T["`**Job Complete**
+    Second job will be SKIPPED`"]
+    S --> U["`**Job Complete**
+    Second job will RUN`"]
     
-    style A fill:#f3e5f5
+    style A fill:#e8f5e8
     style E fill:#ffecb3
-    style J fill:#ffecb3
-    style N fill:#ffecb3
+    style K fill:#ffecb3
+    style O fill:#ffecb3
+    style P fill:#c8e6c9
+    style Q fill:#ffcdd2
 ```
 
 ---
 
-## Tab 3: Dependency Artifact Download Process
+## Tab 3: build-dependencies-with-no-artifacts Job Detail
+
+```mermaid
+graph TD
+    A["`**build-dependencies-with-no-artifacts Job**
+    Runs on: windows-latest
+    Condition: IF dependencies-built == 'incomplete'`"] --> B["`**Setup Environment**
+    • Checkout code
+    • Setup MSBuild & NuGet
+    • Create BHoM folder`"]
+    
+    B --> C["`**Download Dependencies-Incomplete**
+    Download partial dependency set`"]
+    
+    C --> D["`**Restore Existing Dependencies**
+    Copy to BHoM folder`"]
+    
+    D --> E["`**Get Missing Dependencies List**
+    Read missing-dependencies.json`"]
+    
+    E --> F{"`**Any missing dependencies?**`"}
+    F -->|No| G["`**Job Complete - Nothing to build**`"]
+    F -->|Yes| H["`**Setup Authentication**
+    Generate GitHub App token`"]
+    
+    H --> I["`**Clone Missing Dependencies**
+    For each missing dependency:`"]
+    I --> J["`**Clone Repository**
+    • Get branch from branch-map
+    • Clone to Repositories folder
+    • Checkout correct branch`"]
+    
+    J --> K{"`**.sln file exists?**`"}
+    K -->|Yes| L["`**Mark as valid for building**`"]
+    K -->|No| M["`**Skip - no solution file**`"]
+    
+    L --> N["`**Analyze Dependency Order**
+    • Read dependencies.txt files
+    • Create dependency map
+    • Topological sort
+    • Generate build order`"]
+    M --> N
+    
+    N --> O["`**Build Dependencies in Order**
+    For each repository:`"]
+    O --> P["`**Detect Project Type**
+    • Check for packages.config (legacy)
+    • Check for SDK-style projects`"]
+    
+    P --> Q{"`**Legacy project?**`"}
+    Q -->|Yes| R["`**NuGet + MSBuild**
+    • nuget restore
+    • msbuild /restore /m /p:Configuration=Release`"]
+    Q -->|No| S["`**Dotnet CLI**
+    • dotnet restore
+    • dotnet build --configuration Release`"]
+    
+    R --> T{"`**Build successful?**`"}
+    S --> T
+    T -->|No| U["`**BUILD FAILED - EXIT 1**`"]
+    T -->|Yes| V["`**Copy outputs to BHoM folder**`"]
+    
+    V --> W{"`**More dependencies?**`"}
+    W -->|Yes| O
+    W -->|No| X["`**Upload Complete Dependencies**
+    Replace incomplete artifact with complete set`"]
+    
+    X --> Y["`**Job Complete**
+    dependencies-built=true`"]
+    
+    style A fill:#f3e5f5
+    style F fill:#ffecb3
+    style K fill:#ffecb3
+    style Q fill:#ffecb3
+    style T fill:#ffecb3
+    style W fill:#ffecb3
+    style U fill:#ffcdd2
+```
+
+---
+
+## Tab 4: Dependency Artifact Download Process (Priority System)
 
 ```mermaid
 graph TD
     A["`**Download Dependency Artifacts**
-    For each dependency`"] --> B["`**Get Latest CI Build and Test Run**
+    Priority-based system`"] --> B["`**For each dependency:**`"]
+    
+    B --> C["`**Get Latest CI Build and Test Run**
     • Query GitHub API
     • Filter by branch and workflow name`"]
     
-    B --> C{"`**Run found?**`"}
-    C -->|No| D["`**Mark for building**`"]
-    C -->|Yes| E["`**Check Run Status**
-    Status: $status, Conclusion: $conclusion`"]
+    C --> D{"`**Run found?**`"}
+    D -->|No| E["`**Mark as missing**
+    Add to missing-dependencies list`"]
+    D -->|Yes| F["`**Check Run Status & Artifacts**
+    Wait up to 30 attempts × 15 seconds`"]
     
-    E --> F{"`**Run completed?**`"}
-    F -->|Yes| G["`**Check for artifacts immediately**`"]
-    F -->|No| H["`**Start wait loop**
-    Max 10 attempts, 10s each`"]
+    F --> G["`**Priority 1: Try Matching Configurations**
+    For each release config:`"]
+    G --> H{"`**Matching artifact found?**`"}
+    H -->|Yes| I["`**Download Matching Artifact**
+    build-outputs-$branch-$releaseConfig`"]
+    H -->|No| J["`**Try next configuration**`"]
     
-    H --> I["`**Wait 10 seconds**`"]
-    I --> J["`**Check run status**`"]
-    J --> K["`**Check for artifacts**`"]
-    K --> L{"`**Required artifacts found?**`"}
+    J --> K{"`**More configs to try?**`"}
+    K -->|Yes| G
+    K -->|No| L["`**Priority 2: Try Release Fallback**
+    Look for build-outputs-$branch-Release`"]
     
-    L -->|Yes| M["`**Download & Extract**
-    • Download artifact ZIP
-    • Extract to dependencies folder
-    • Copy to BHoM folder`"]
+    L --> M{"`**Release artifact found?**`"}
+    M -->|Yes| N["`**Download Release Artifact**
+    Fallback to standard Release build`"]
+    M -->|No| O["`**Mark as missing**
+    No suitable artifacts available`"]
     
-    L -->|No| N{"`**Run completed?**`"}
-    N -->|Yes| O{"`**Has any artifacts?**`"}
-    N -->|No| P{"`**Max attempts reached?**`"}
+    I --> P["`**Extract & Copy**
+    • Download ZIP
+    • Extract to temp folder
+    • Copy to BHoM folder (/tmp/BHoM)`"]
+    N --> P
     
-    O -->|Yes| Q["`**CRITICAL ERROR**
-    Expected artifacts not found
-    List available artifacts
-    EXIT 1`"]
-    O -->|No| R["`**CRITICAL ERROR**
-    No artifacts in completed run
-    EXIT 1`"]
+    P --> Q["`**Mark as found**
+    Add to downloaded-artifacts list`"]
     
-    P -->|Yes| S["`**Mark for building**
-    Timeout reached`"]
-    P -->|No| H
+    E --> R{"`**More dependencies?**`"}
+    O --> R
+    Q --> R
     
-    G --> L
-    M --> T["`**Success - Continue to next dependency**`"]
-    D --> U["`**Continue to clone & build phase**`"]
-    S --> U
+    R -->|Yes| B
+    R -->|No| S["`**Generate Summary**
+    • Count downloaded vs missing
+    • Set dependencies-built status`"]
     
-    style C fill:#ffecb3
-    style F fill:#ffecb3
-    style L fill:#ffecb3
-    style N fill:#ffecb3
-    style O fill:#ffecb3
-    style P fill:#ffecb3
-    style Q fill:#ffcdd2
-    style R fill:#ffcdd2
-```
-
----
-
-## Tab 4: Test Toolkit Tests Download
-
-```mermaid
-graph TD
-    A["`**Download Test Toolkit Tests**
-    Repository: BHoM/Test_Toolkit`"] --> B["`**Branch Priority Order**
-    1. ${{ inputs.branch_name }}
-    2. develop
-    3. Test_Toolkit-InvestigateRunningAllChecksThroughNUnit`"]
+    S --> T{"`**Any missing?**`"}
+    T -->|Yes| U["`**Status: incomplete**
+    Second job will run`"]
+    T -->|No| V["`**Status: complete**
+    Second job will be skipped`"]
     
-    B --> C["`**For each branch in priority order:**`"]
-    C --> D["`**Get successful runs from branch**`"]
-    D --> E{"`**Runs found?**`"}
-    
-    E -->|No| F["`**Try next branch**`"]
-    E -->|Yes| G["`**Check latest run for Tests artifact**`"]
-    
-    G --> H{"`**Tests artifact found?**`"}
-    H -->|Yes| I["`**Download & Extract**
-    • Download Tests.zip
-    • Extract to _Tests_ folder
-    • Clean up ZIP file`"]
-    H -->|No| F
-    
-    I --> J["`**Success - Upload as Test-Toolkit-Tests artifact**`"]
-    
-    F --> K{"`**More branches to try?**`"}
-    K -->|Yes| C
-    K -->|No| L["`**Create empty _Tests_ folder**
-    Workflow can continue without tests`"]
-    
-    L --> M["`**Upload empty Test-Toolkit-Tests artifact**`"]
-    J --> N["`**Continue to build job**`"]
-    M --> N
-    
-    style E fill:#ffecb3
+    style D fill:#ffecb3
     style H fill:#ffecb3
     style K fill:#ffecb3
-    style L fill:#fff3e0
+    style M fill:#ffecb3
+    style T fill:#ffecb3
+    style U fill:#ffcdd2
+    style V fill:#c8e6c9
 ```
 
 ---
@@ -258,13 +331,14 @@ graph TD
 ```mermaid
 graph TD
     A["`**build Job (Matrix)**
-    For each build-configuration`"] --> B["`**Setup Environment**
+    For each build-configuration
+    Runs on: windows-latest`"] --> B["`**Setup Environment**
     • Checkout code
     • Setup MSBuild & NuGet
     • Create BHoM folder`"]
     
-    B --> C{"`**Dependencies built?**`"}
-    C -->|Yes| D["`**Download Dependencies artifact**
+    B --> C{"`**Dependencies available?**`"}
+    C -->|complete OR built| D["`**Download Dependencies artifact**
     Extract to BHoM folder`"]
     C -->|No| E["`**Skip dependency download**`"]
     
@@ -277,6 +351,7 @@ graph TD
     
     G --> H["`**Build Project**
     • Find .sln file
+    • Detect project type
     • Try dotnet restore & build
     • Fallback to NuGet restore & MSBuild`"]
     
@@ -290,73 +365,93 @@ graph TD
     K --> L["`**Upload Build Artifacts**
     Name: build-outputs-$branch-$config`"]
     
-    L --> M["`**Download Test Toolkit Tests**
-    Download Test-Toolkit-Tests artifact`"]
+    L --> M{"`**Release configuration?**`"}
+    M -->|Yes| N["`**Upload BHoM Assemblies**
+    Name: bhom-assemblies-$config
+    For test job consumption`"]
+    M -->|No| O["`**Skip assemblies upload**`"]
     
-    M --> N["`**Identify Tests**
-    • Find DLL files in _Tests_
-    • Check for NUnit references
-    • Verify actual test methods exist`"]
+    N --> P["`**Save Updated Assemblies List**
+    Create updated-assemblies-$config.txt`"]
+    O --> P
     
-    N --> O{"`**Test DLLs found?**`"}
-    O -->|No| P["`**No tests to run - EXIT 1**`"]
-    O -->|Yes| Q["`**Run Individual Tests**
-    For each test DLL:`"]
+    P --> Q["`**Job Complete**`"]
     
-    Q --> R["`**Execute Tests**
-    • Add test parameters if available
-    • Generate TRX log files
-    • Track pass/fail status`"]
-    
-    R --> S{"`**All tests passed?**`"}
-    S -->|No| T["`**Some tests failed - EXIT 1**`"]
-    S -->|Yes| U["`**Upload Test Results**
-    Upload TRX files as artifacts`"]
-    
-    U --> V["`**Job Complete**`"]
-    
+    style A fill:#fff3e0
     style C fill:#ffecb3
     style I fill:#ffecb3
-    style O fill:#ffecb3
-    style S fill:#ffecb3
+    style M fill:#ffecb3
     style J fill:#ffcdd2
-    style P fill:#ffcdd2
-    style T fill:#ffcdd2
 ```
 
 ---
 
-## Tab 6: test-report Job (Matrix) Detail
+## Tab 6: tests Job Detail
 
 ```mermaid
 graph TD
-    A["`**test-report Job (Matrix)**
-    For each test-dll from build job`"] --> B{"`**Test DLLs exist?**`"}
+    A["`**tests Job**
+    Runs on: windows-latest
+    Needs: setup-configurations-and-dependencies + build
+    Condition: IF both jobs succeeded`"] --> B["`**Setup Environment**
+    • Checkout code
+    • Create BHoM directory`"]
     
-    B -->|No| C["`**Skip - No tests to report**`"]
-    B -->|Yes| D["`**Setup Environment**
-    • Checkout repository
-    • Run on ubuntu-latest`"]
+    B --> C["`**Download and Merge BHoM Assemblies**
+    Download all bhom-assemblies-* artifacts`"]
     
-    D --> E["`**Download Test Results**
-    • Download all test-results-* artifacts
-    • Merge multiple artifacts`"]
+    C --> D["`**Download Test Toolkit Tests**
+    Multi-branch priority system`"]
     
-    E --> F["`**Create Test Report**
-    • Use dorny/test-reporter@v1
-    • Generate report for specific test DLL
-    • Format: dotnet-trx
-    • List failed tests only`"]
+    D --> E["`**Convert Changed Files Paths**
+    Convert relative paths to absolute Windows paths`"]
     
-    F --> G["`**Publish Report**
-    • Create GitHub check
-    • Show test results in PR/commit
-    • Include pass/fail summary`"]
+    E --> F["`**Identify Tests**
+    • Find DLL files in _Tests_
+    • Check for NUnit references
+    • Pre-filter test assemblies`"]
     
-    G --> H["`**Job Complete**`"]
-    C --> H
+    F --> G{"`**Test DLLs found?**`"}
+    G -->|No| H["`**No tests to run - EXIT 1**`"]
+    G -->|Yes| I["`**Run Individual Tests**
+    For each test DLL:`"]
     
-    style B fill:#ffecb3
+    I --> J{"`**Release builds available?**`"}
+    J -->|Yes| K["`**Run tests per release build**
+    With UpdatedAssemblies parameters`"]
+    J -->|No| L["`**Run tests once**
+    With UpdatedFiles parameters only`"]
+    
+    K --> M["`**Execute Tests (TRX format)**
+    • dotnet test --logger trx
+    • Generate test-results-$dll-$config.trx
+    • Pass test parameters`"]
+    L --> N["`**Execute Tests (TRX format)**
+    • dotnet test --logger trx
+    • Generate test-results-$dll.trx`"]
+    
+    M --> O{"`**All tests passed?**`"}
+    N --> O
+    O -->|No| P["`**Some tests failed - EXIT 1**`"]
+    O -->|Yes| Q["`**Merge TRX files by test DLL**
+    Group by DLL, merge configurations`"]
+    
+    Q --> R["`**Generate Dynamic Test Reports**
+    Create composite action for dorny/test-reporter`"]
+    
+    R --> S["`**Execute Test Reports**
+    • Use dorny/test-reporter@v2
+    • Reporter: dotnet-trx
+    • Generate GitHub check runs`"]
+    
+    S --> T["`**Job Complete**`"]
+    
+    style A fill:#fce4ec
+    style G fill:#ffecb3
+    style J fill:#ffecb3
+    style O fill:#ffecb3
+    style H fill:#ffcdd2
+    style P fill:#ffcdd2
 ```
 
 ---
@@ -367,27 +462,105 @@ graph TD
 graph TD
     A["`**BHoM Build Workflow**
     Triggered by workflow_call
-    Inputs: repository_name, branch_name, dotnet_version`"] --> B["`**Job 1: prepare-dependencies**
-    Runs on: windows-latest
-    Purpose: Setup dependencies and test artifacts`"]
+    Inputs: repository_name, branch_name, dotnet_version`"] --> B["`**Job 1: setup-configurations-and-dependencies**
+    Runs on: ubuntu-latest
+    Duration: ~2-3 minutes
+    Purpose: Config discovery & dependency download`"]
     
-    B --> C["`**Job 2: build**
+    B --> C{"`**Dependencies complete?**`"}
+    
+    C -->|incomplete| D["`**Job 2: build-dependencies-with-no-artifacts**
+    Runs on: windows-latest
+    Duration: ~5-15 minutes (conditional)
+    Purpose: Build missing dependencies only`"]
+    
+    C -->|complete| E["`**Skip Job 2**
+    All dependencies already available`"]
+    
+    D --> F["`**Job 3: build (Matrix)**
     Runs on: windows-latest
     Matrix: build-configuration
-    Purpose: Build and test the project`"]
+    Duration: ~3-10 minutes per config
+    Purpose: Build project`"]
     
-    C --> D["`**Job 3: test-report**
-    Runs on: ubuntu-latest
-    Matrix: test-dll
-    Purpose: Generate test reports`"]
+    E --> F
     
-    B -.->|"Outputs: build-configurations<br/>release-configurations<br/>dependencies-built<br/>changed-files"| C
-    C -.->|"Outputs: test-dll-names"| D
+    F --> G["`**Job 4: tests**
+    Runs on: windows-latest
+    Duration: ~2-5 minutes
+    Purpose: Run tests & generate reports`"]
+    
+    B -.->|"build-configurations<br/>release-configurations<br/>dependencies-built<br/>changed-files<br/>missing-dependencies<br/>branch-map"| C
+    
+    B -.->|"Dependencies or<br/>Dependencies-Incomplete<br/>artifact"| D
+    
+    D -.->|"Dependencies artifact<br/>(complete set)<br/>dependencies-built=true"| F
+    
+    B -.->|"Configuration outputs<br/>changed-files"| G
+    
+    F -.->|"bhom-assemblies-*<br/>updated-assemblies-*.txt"| G
+    
+    H["`**Key Optimizations:**
+    
+    🚀 **Ubuntu First Job**: Faster, cheaper for config discovery
+    ⚡ **Conditional Windows Job**: Only runs when needed
+    🎯 **Priority Download System**: Matching configs → Release fallback
+    🔄 **Cross-Platform Paths**: Ubuntu relative → Windows absolute
+    📊 **Matrix Parallelization**: Multiple configurations simultaneously`"]
     
     style A fill:#e1f5fe
-    style B fill:#f3e5f5
+    style B fill:#e8f5e8
+    style C fill:#ffecb3
+    style D fill:#f3e5f5
+    style E fill:#e0f2f1
+    style F fill:#fff3e0
+    style G fill:#fce4ec
+    style H fill:#f1f8e9
+```
+
+---
+
+## Tab 8: Cross-Platform Path Handling
+
+```mermaid
+graph TD
+    A["`**Cross-Platform Path Challenge**
+    Ubuntu job → Windows tests`"] --> B["`**Ubuntu Job (setup-configurations-and-dependencies)**
+    Git diff generates relative paths`"]
+    
+    B --> C["`**Changed Files Processing**
+    • git diff --name-only develop HEAD
+    • Returns: TestA_Engine/Query/Method.cs
+    • Store as relative paths (no $(pwd) prefix)`"]
+    
+    C --> D["`**Pass to Windows Job**
+    changed-files=TestA_Engine/Query/Method.cs;Other/File.cs`"]
+    
+    D --> E["`**Windows Tests Job**
+    Convert relative → absolute paths`"]
+    
+    E --> F["`**Path Conversion Logic**
+    $workspaceRoot = Get-Location
+    $absolutePath = Join-Path $workspaceRoot $relativePath`"]
+    
+    F --> G["`**Result**
+    D:\a\TestRepo_A\TestRepo_A\TestA_Engine\Query\Method.cs`"]
+    
+    G --> H["`**Test Execution**
+    Tests can now find files correctly`"]
+    
+    I["`**Why This Works:**
+    
+    ✅ **Ubuntu**: Generates portable relative paths
+    ✅ **Windows**: Converts to proper Windows absolute paths
+    ✅ **Cross-Platform**: No hardcoded platform-specific paths
+    ✅ **Workspace Aware**: Uses current working directory`"]
+    
+    style A fill:#ffecb3
     style C fill:#e8f5e8
-    style D fill:#fff3e0
+    style F fill:#fff3e0
+    style G fill:#c8e6c9
+    style I fill:#f1f8e9
 ```
 
 ---
@@ -411,11 +584,13 @@ graph TD
 
 ## Key Features Illustrated
 
-- **Concurrency control** and workflow cancellation
+- **Split Job Architecture**: Ubuntu for configs, Windows for building when needed
+- **Conditional Execution**: Second job only runs when dependencies are missing
+- **Priority-Based Downloads**: Matching configurations → Release fallback
+- **Cross-Platform Path Handling**: Ubuntu relative paths → Windows absolute paths
 - **Matrix job execution** for parallel builds
 - **Artifact dependencies** between jobs
 - **Error handling** and exit conditions
 - **Authentication hierarchy** (GitHub App → PAT → Default token)
-- **Performance optimizations** (parallel checking, early termination)
-- **Branch prioritization** for test toolkit downloads
-- **Wait loops** for running workflows
+- **Performance optimizations** (Ubuntu first, conditional building)
+- **TRX test reporting** with dorny/test-reporter
