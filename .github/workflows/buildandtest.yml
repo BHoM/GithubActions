@@ -3,12 +3,8 @@ name: CI Build and Test
 on:
   workflow_call:
     inputs:
-      repository_name:
-        description: 'Name of the repository being built'
-        required: true
-        type: string
       branch_name:
-        description: 'Branch name being built'
+        description: 'Branch name for artifact naming'
         required: true
         type: string
     secrets:
