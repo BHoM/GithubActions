@@ -169,20 +169,19 @@ jobs:
                   echo "... and $((file_count - 5)) more files"
                 fi
                 
-                    # Convert to full paths and join with semicolons
-                full_paths=""
-                while IFS= read -r file; do
-                  if [ -n "$file" ]; then
-                    full_path="$(pwd)/$file"
-                    if [ -n "$full_paths" ]; then
-                      full_paths="$full_paths;$full_path"
-                    else
-                      full_paths="$full_path"
-                    fi
+              # Use relative paths (no conversion to absolute paths)
+              relative_paths=""
+              while IFS= read -r file; do
+                if [ -n "$file" ]; then
+                  if [ -n "$relative_paths" ]; then
+                    relative_paths="$relative_paths;$file"
+                  else
+                    relative_paths="$file"
                   fi
-                done <<< "$changed_files"
-                
-                echo "changed-files=$full_paths" >> $GITHUB_OUTPUT
+                fi
+              done <<< "$changed_files"
+              
+              echo "changed-files=$relative_paths" >> $GITHUB_OUTPUT
               else
                 echo "No changes found compared to develop branch (this is normal)"
                 echo "changed-files=" >> $GITHUB_OUTPUT
