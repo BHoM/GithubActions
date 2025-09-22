@@ -1,12 +1,22 @@
-name: CI Build and Test
+name: BHoM Build Workflow
 
 on:
   workflow_call:
     inputs:
-      branch_name:
-        description: 'Branch name for artifact naming'
+      repository_name:
+        description: 'Name of the repository being built'
         required: true
         type: string
+      branch_name:
+        description: 'Branch name being built'
+        required: true
+        type: string
+      dotnet_version:
+        description: '.NET version to use'
+        required: false
+        type: string
+        default: '8.0.x'
+
     secrets:
       GH_TOKEN:
         description: 'GitHub token for accessing artifacts from other repositories (PAT or GitHub App token). If not provided, will only access public repositories.'
@@ -18,25 +28,1695 @@ on:
         description: 'GitHub App Private Key (alternative to GH_TOKEN)'
         required: false
 
-
-concurrency:
+concurrency:  # cancel in progress runs if this workflow is triggered again. Makes sure new commits cancel previous runs
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build
-    uses: BHoM/GithubActions/.github/workflows/build.yml@develop
-    with:
-      branch_name: ${{ inputs.branch_name || github.ref_name }}
-    secrets: inherit
+  prepare-dependencies:
+    runs-on: windows-latest
+    outputs:
+      build-configurations: ${{ steps.discover-configs.outputs.build-configurations }}
+      release-configurations: ${{ steps.discover-configs.outputs.release-configurations }}
+      dependencies-built: ${{ steps.build-summary.outputs.dependencies-built }}
+      changed-files: ${{ steps.get-changed-files.outputs.changed-files }}
+    env:
+      BHoMFolder: "C:\\ProgramData\\BHoM"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-  test:
-    name: Test
-    needs: build
-    uses: BHoM/GithubActions/.github/workflows/test.yml@develop
-    with:
-      branch_name: ${{ inputs.branch_name || github.ref_name }}
-      release-configurations: ${{ needs.build.outputs.release-configurations }}
-      changed-files: ${{ needs.build.outputs.changed-files }}
-    secrets: inherit
+      - name: Discover build configurations
+        id: discover-configs
+        run: |
+          # Find the .sln file in the current directory
+          $sln_files = Get-ChildItem -Filter "*.sln" -File
+          
+          if ($sln_files.Count -eq 0) {
+            Write-Host "✗ No .sln file found in root directory" -ForegroundColor Red
+            echo "build-configurations=[]" >> $env:GITHUB_OUTPUT
+            echo "release-configurations=[]" >> $env:GITHUB_OUTPUT
+            exit 1
+          }
+          
+          if ($sln_files.Count -gt 1) {
+            Write-Host "⚠ Multiple .sln files found, using the first one: $($sln_files[0].Name)" -ForegroundColor Yellow
+          }
+          
+          $sln_file = $sln_files[0]
+          Write-Host "Analyzing solution file: $($sln_file.Name)" -ForegroundColor Cyan
+          
+          # Parse solution file to find build configurations
+          $content = Get-Content $sln_file.FullName
+          $configs = @()
+          $releaseConfigs = @()
+          
+          # Look for GlobalSection(SolutionConfigurationPlatforms) section
+          $inConfigSection = $false
+          foreach ($line in $content) {
+            if ($line -match "GlobalSection\(SolutionConfigurationPlatforms\)") {
+              $inConfigSection = $true
+              continue
+            }
+            if ($inConfigSection -and $line -match "EndGlobalSection") {
+              break
+            }
+            if ($inConfigSection -and $line -match "^\s*([^=]+)\s*=") {
+              $fullConfig = $matches[1].Trim()
+              # Extract only the configuration name (before the pipe)
+              if ($fullConfig -match "^([^|]+)") {
+                $config = $matches[1].Trim()
+                if ($configs -notcontains $config) {
+                  $configs += $config
+                  Write-Host "Found build configuration: $config"
+                  
+                  # Check if it's a Release configuration (starts with "Release")
+                  if ($config -match "^Release") {
+                    $releaseConfigs += $config
+                    Write-Host "  → Identified as Release configuration"
+                  }
+                }
+              }
+            }
+          }
+          
+          if ($configs.Count -eq 0) {
+            Write-Host "⚠ No build configurations found in solution file, using default" -ForegroundColor Yellow
+            $configs = @("Debug", "Release")
+            $releaseConfigs = @("Release")
+          }
+          
+          Write-Host "`nDiscovered build configurations:"
+          for ($i = 0; $i -lt $configs.Count; $i++) {
+            Write-Host "  $($i + 1). $($configs[$i])"
+          }
+          
+          Write-Host "`nRelease configurations (for artifact download):"
+          for ($i = 0; $i -lt $releaseConfigs.Count; $i++) {
+            Write-Host "  $($i + 1). $($releaseConfigs[$i])"
+          }
+          
+          # Convert to JSON for matrix strategy
+          # Force array format even for single items by wrapping in array if needed
+          $configsJson = if ($configs.Count -eq 1) { "[$($configs[0] | ConvertTo-Json -Compress)]" } else { $configs | ConvertTo-Json -Compress }
+          $releaseConfigsJson = if ($releaseConfigs.Count -eq 1) { "[$($releaseConfigs[0] | ConvertTo-Json -Compress)]" } else { $releaseConfigs | ConvertTo-Json -Compress }
+          
+          Write-Host "`nJSON outputs for matrix:"
+          Write-Host "build-configurations=$configsJson"
+          Write-Host "release-configurations=$releaseConfigsJson"
+          
+          echo "build-configurations=$configsJson" >> $env:GITHUB_OUTPUT
+          echo "release-configurations=$releaseConfigsJson" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+
+
+      - name: Parse dependencies
+        id: parse-deps
+        run: |
+          if (Test-Path "dependencies.txt") {
+            $deps = Get-Content "dependencies.txt" | Where-Object { $_.Trim() -and !$_.StartsWith("#") } | ConvertTo-Json -Compress
+            echo "dependencies=$deps" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "dependencies=[]" >> $env:GITHUB_OUTPUT
+          }
+        shell: pwsh
+
+      - name: Get changed files
+        id: get-changed-files
+        run: |
+          $branchName = '${{ inputs.branch_name }}'
+          Write-Host "Current branch: $branchName"
+          
+          if ($branchName -eq 'develop') {
+            Write-Host "Running on develop branch - no changed files to track"
+            echo "changed-files=" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "Getting list of changed files compared to develop..."
+            
+            # Fetch develop branch for comparison
+            try {
+              Write-Host "Fetching develop branch..."
+              git fetch origin develop:develop 2>&1 | Write-Host
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "Successfully fetched develop branch, comparing files..."
+                
+                # Debug: Show current commit and develop commit
+                $currentCommit = git rev-parse HEAD
+                $developCommit = git rev-parse develop
+                Write-Host "Current commit: $currentCommit"
+                Write-Host "Develop commit: $developCommit"
+                
+                # Compare current branch (HEAD) with develop using two-dot syntax
+                # Include all changes except deleted files (A=added, C=copied, M=modified, R=renamed, T=type changed)
+                Write-Host "Comparing current branch with develop branch (excluding deleted files only)..."
+                $changedFiles = git diff --name-only --diff-filter=ACMRT develop HEAD 2>&1
+                $gitDiffExitCode = $LASTEXITCODE
+                
+                Write-Host "Git diff exit code: $gitDiffExitCode"
+                if ($changedFiles) {
+                  Write-Host "Found $($changedFiles.Count) changed files (excluding deletions)"
+                  # Show first few files for debugging
+                  $displayCount = [Math]::Min(5, $changedFiles.Count)
+                  Write-Host "First $displayCount files:"
+                  for ($i = 0; $i -lt $displayCount; $i++) {
+                    Write-Host "  $($changedFiles[$i])"
+                  }
+                  if ($changedFiles.Count -gt 5) {
+                    Write-Host "  ... and $($changedFiles.Count - 5) more files"
+                  }
+                } else {
+                  Write-Host "No files returned from git diff"
+                }
+                
+                # Reset exit code for this step
+                $LASTEXITCODE = 0
+                
+                if ($gitDiffExitCode -eq 0) {
+                  if ($changedFiles -and $changedFiles.Count -gt 0) {
+                    # Convert to full paths and join with semicolons
+                    $fullPaths = @()
+                    foreach ($file in $changedFiles) {
+                      if ($file -and $file.Trim()) {
+                        $fullPath = Join-Path (Get-Location) $file.Trim()
+                        $fullPaths += $fullPath
+                      }
+                    }
+                    
+                    if ($fullPaths.Count -gt 0) {
+                      $changedFilesString = $fullPaths -join ';'
+                      Write-Host "Changed files ($($fullPaths.Count)) - excluding deletions:"
+                      foreach ($file in $fullPaths) {
+                        Write-Host "  $file"
+                      }
+                      echo "changed-files=$changedFilesString" >> $env:GITHUB_OUTPUT
+                    } else {
+                      Write-Host "No valid changed files detected after filtering"
+                      echo "changed-files=" >> $env:GITHUB_OUTPUT
+                    }
+                  } else {
+                    Write-Host "No changes found compared to develop branch (this is normal)"
+                    echo "changed-files=" >> $env:GITHUB_OUTPUT
+                  }
+                } else {
+                  Write-Host "Git diff returned exit code $gitDiffExitCode, treating as no changes"
+                  echo "changed-files=" >> $env:GITHUB_OUTPUT
+                }
+              } else {
+                Write-Host "⚠ Could not fetch develop branch, skipping changed files detection" -ForegroundColor Yellow
+                echo "changed-files=" >> $env:GITHUB_OUTPUT
+              }
+            } catch {
+              Write-Host "⚠ Error during git operations: $($_.Exception.Message)" -ForegroundColor Yellow
+              Write-Host "Skipping changed files detection"
+              echo "changed-files=" >> $env:GITHUB_OUTPUT
+            }
+            
+            # Ensure step always succeeds
+            $LASTEXITCODE = 0
+          }
+        shell: pwsh
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      
+      - name: Setup NuGet.exe for use with actions
+        uses: NuGet/setup-nuget@v2.0.1
+
+      - name: Create BHoM folder
+        run: New-Item -ItemType Directory -Force -Path "$env:BHoMFolder\Assemblies" | Out-Null
+        shell: pwsh
+
+      - name: Check GitHub App secrets
+        id: check-app-secrets
+        run: |
+          if [ -n "${{ secrets.APP_ID }}" ] && [ -n "${{ secrets.APP_PRIVATE_KEY }}" ]; then
+            echo "app-secrets-available=true" >> $GITHUB_OUTPUT
+          else
+            echo "app-secrets-available=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Generate GitHub App Token
+        id: generate-token
+        if: steps.check-app-secrets.outputs.app-secrets-available == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Determine dependency branches
+        id: determine-branches
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.GH_TOKEN || github.token }}
+        run: |
+          $dependencies = '${{ steps.parse-deps.outputs.dependencies }}' | ConvertFrom-Json
+          $branch_name = '${{ inputs.branch_name }}'
+          $branchMap = @{}
+          
+          Write-Host "Determining branches for dependencies..."
+          Write-Host "Target branch: $branch_name"
+          
+          # URL encode the branch name for API calls (handles special characters like #)
+          $encodedBranchName = [System.Web.HttpUtility]::UrlEncode($branch_name)
+
+          foreach ($dep in $dependencies) {
+            Write-Host "Checking branch availability for $dep"
+
+            # Check if target branch exists in the dependency repo
+            $branchExists = $false
+            try {
+              $branchResult = gh api "/repos/$dep/branches/$encodedBranchName" 2>$null
+              if ($LASTEXITCODE -eq 0 -and $branchResult) {
+                $branchExists = $true
+                Write-Host "  ✓ Branch '$branch_name' exists"
+              }
+            } catch {
+              # Branch doesn't exist or no access
+            }
+            
+            # Reset exit code to prevent step failure
+            $LASTEXITCODE = 0
+            
+            if ($branchExists) {
+              $branchMap[$dep] = $branch_name
+            } else {
+              $branchMap[$dep] = "develop"
+              Write-Host "  → Falling back to 'develop' branch"
+            }
+          }
+          
+          # Display final branch mapping
+          Write-Host "`nBranch mapping for dependencies:"
+          foreach ($dep in $dependencies) {
+            Write-Host "  $dep → $($branchMap[$dep])"
+          }
+          
+          # Convert to JSON for use in subsequent steps
+          $branchMapJson = $branchMap | ConvertTo-Json -Compress
+          echo "branch-map=$branchMapJson" >> $env:GITHUB_OUTPUT
+          
+          # Ensure step always succeeds
+          $LASTEXITCODE = 0
+        shell: pwsh
+
+      - name: Download dependency artifacts
+        id: download-deps
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.GH_TOKEN || github.token }}
+        run: |
+          $dependencies = '${{ steps.parse-deps.outputs.dependencies }}' | ConvertFrom-Json
+          $branchMap = '${{ steps.determine-branches.outputs.branch-map }}' | ConvertFrom-Json
+          $downloaded_artifacts = @()
+          
+          # Determine authentication method
+          if ('${{ steps.generate-token.outputs.token }}' -ne '') {
+            Write-Host "Using GitHub App authentication"
+          } elseif ('${{ secrets.GH_TOKEN }}' -ne '') {
+            Write-Host "Using provided token"
+          } else {
+            Write-Host "Using default GITHUB_TOKEN"
+          }
+          
+          Write-Host "Downloading artifacts using pre-determined branches..."
+          
+          if ($dependencies.Count -gt 0) {
+            foreach ($dep in $dependencies) {
+              $target_branch = $branchMap.$dep
+              Write-Host "Processing dependency: $dep (branch: $target_branch)"
+              
+              # Get latest run of the BHoM Build Workflow for the target branch (regardless of status)
+              $runsResponse = gh api "/repos/$dep/actions/runs?per_page=50" 2>$null
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "No access to $dep on $target_branch - will need to build"
+                continue
+              }
+              
+              $runs = $runsResponse | ConvertFrom-Json
+              $workflowRuns = $runs.workflow_runs | Where-Object { 
+                $_.head_branch -eq $target_branch -and $_.name -eq "CI Build and Test"
+              }
+              
+              if (-not $workflowRuns -or $workflowRuns.Count -eq 0) {
+                Write-Host "No CI Build and Test workflow runs found for $dep on $target_branch - will need to build"
+                continue
+              }
+              
+              $latestRun = $workflowRuns[0]
+              $run_id = $latestRun.id
+              Write-Host "Found latest CI Build and Test workflow run: $run_id for $dep on $target_branch (status: $($latestRun.status), conclusion: $($latestRun.conclusion))"
+              
+              # Get Release configurations to try
+              $releaseConfigs = '${{ steps.discover-configs.outputs.release-configurations }}' | ConvertFrom-Json
+              if ($releaseConfigs.Count -eq 0) { $releaseConfigs = @("Release") }
+              
+              $found = $false
+              $waitAttempts = 0
+              $maxWaitAttempts = 10
+              
+              # Check for artifacts, even if workflow is still running
+              while ($waitAttempts -le $maxWaitAttempts -and -not $found) {
+                if ($waitAttempts -gt 0) {
+                  Write-Host "Wait attempt $waitAttempts/$maxWaitAttempts - checking for artifacts..."
+                  Start-Sleep -Seconds 10
+                }
+                
+                # Check run status and artifacts
+                if ($waitAttempts -gt 0) {
+                  $runStatusResponse = gh api "/repos/$dep/actions/runs/$run_id" 2>$null
+                  if ($runStatusResponse) {
+                    $latestRun = $runStatusResponse | ConvertFrom-Json
+                    Write-Host "Run status: $($latestRun.status), conclusion: $($latestRun.conclusion)"
+                  }
+                }
+                
+                # Check if artifacts are available
+                $artifactsResponse = gh api "/repos/$dep/actions/runs/$run_id/artifacts" 2>$null
+                if ($artifactsResponse) {
+                  $allArtifacts = $artifactsResponse | ConvertFrom-Json
+                  
+                  if ($allArtifacts.artifacts -and $allArtifacts.artifacts.Count -gt 0) {
+                    Write-Host "Run has $($allArtifacts.artifacts.Count) artifacts available"
+                    
+                    # Look for the specific artifacts we need
+              foreach ($releaseConfig in $releaseConfigs) {
+                $artifact_name = "build-outputs-$target_branch-$releaseConfig"
+                Write-Host "Looking for artifact: $artifact_name"
+                
+                      $targetArtifact = $allArtifacts.artifacts | Where-Object { $_.name -eq $artifact_name }
+                
+                      if ($targetArtifact) {
+                        Write-Host "✓ Found artifact: $artifact_name from $dep"
+                  $dep_safe = $dep.Replace('/', '_')
+                  
+                  # Download and extract
+                        gh api "/repos/$dep/actions/artifacts/$($targetArtifact.id)/zip" > "${dep_safe}_artifact.zip"
+                  New-Item -ItemType Directory -Force -Path "dependencies\$dep_safe"
+                  Expand-Archive -Path "${dep_safe}_artifact.zip" -DestinationPath "dependencies\$dep_safe" -Force
+                  
+                  # Copy to BHoM folder
+                  if (Test-Path "dependencies\$dep_safe") {
+                    Copy-Item "dependencies\$dep_safe\*" -Destination "$env:BHoMFolder\" -Recurse -Force -ErrorAction SilentlyContinue
+                  }
+                  
+                  Write-Host "✓ Successfully downloaded artifact for $dep for configuration $releaseConfig"
+                  $found = $true
+                        break
+                      }
+                    }
+                    
+                    if ($found) {
+                      break
+                    }
+                  }
+                }
+                
+                # If workflow is completed and we still haven't found artifacts, exit with error
+                if ($latestRun.status -eq "completed" -and -not $found) {
+                  if ($allArtifacts.artifacts -and $allArtifacts.artifacts.Count -gt 0) {
+                    Write-Host "Available artifacts in run ${run_id}:"
+                    foreach ($art in $allArtifacts.artifacts) {
+                      Write-Host "  - $($art.name)"
+                    }
+                    Write-Host "✗ CRITICAL ERROR: Expected artifact not found for dependency $dep" -ForegroundColor Red
+                    Write-Host "Expected artifacts matching pattern: build-outputs-$target_branch-[Release configs]" -ForegroundColor Red
+                  } else {
+                    Write-Host "✗ CRITICAL ERROR: Completed run $run_id has no artifacts for dependency $dep" -ForegroundColor Red
+                    Write-Host "This indicates the dependency build failed or did not produce expected outputs." -ForegroundColor Red
+                  }
+                  exit 1
+                }
+                
+                # If workflow is still running, continue waiting
+                if ($latestRun.status -eq "in_progress" -or $latestRun.status -eq "queued") {
+                  if ($waitAttempts -eq 0) {
+                    Write-Host "Run $run_id is still running, will check for artifacts while waiting..."
+                  }
+                  $waitAttempts++
+                } else {
+                  # Workflow completed but no artifacts found
+                  break
+                }
+              }
+              
+              if ($found) {
+                $downloaded_artifacts += $dep
+                Write-Host "✓ Completed artifact downloads for $dep"
+              } else {
+                if ($waitAttempts -gt $maxWaitAttempts) {
+                  Write-Host "✗ Run did not complete or produce artifacts after $maxWaitAttempts wait attempts - will need to build"
+                } else {
+                  Write-Host "✗ No suitable artifacts found for $dep - will need to build"
+                }
+              }
+            }
+          }
+          
+          # Output results
+          $downloaded_string = $downloaded_artifacts -join ","
+          echo "artifacts-downloaded=$downloaded_string" >> $env:GITHUB_OUTPUT
+          Write-Host "✓ Artifact resolution completed. Downloaded: $($downloaded_artifacts.Count) dependencies"
+        shell: pwsh
+
+      - name: Clone missing dependencies
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          $dependencies = '${{ steps.parse-deps.outputs.dependencies }}' | ConvertFrom-Json
+          $downloaded = '${{ steps.download-deps.outputs.artifacts-downloaded }}' -split ',' | Where-Object { $_ -ne "" }
+          $branchMap = '${{ steps.determine-branches.outputs.branch-map }}' | ConvertFrom-Json
+          
+          # Create repositories directory
+          New-Item -ItemType Directory -Force -Path "Repositories"
+          
+          # Process only missing dependencies
+          foreach ($dep in $dependencies) {
+            if ($downloaded -notcontains $dep) {
+              $target_branch = $branchMap.$dep
+              Write-Host "Processing missing dependency: $dep (branch: $target_branch)"
+              
+              # Extract repo name from dependency
+              $repo_name = $dep.Split('/')[-1]
+              $repo_url = "https://github.com/$dep.git"
+              
+              Write-Host "Cloning repository: $repo_name from $repo_url"
+              
+              try {
+                git clone $repo_url "Repositories\$repo_name"
+                
+                # Checkout the pre-determined branch (we know it exists)
+                Push-Location "Repositories\$repo_name"
+                git checkout "$target_branch"
+                Write-Host "✓ Checked out branch: $target_branch"
+                Pop-Location
+                
+                Write-Host "Successfully cloned $repo_name"
+                
+                # Check if .sln file exists in base folder
+                $sln_files = Get-ChildItem "Repositories\$repo_name" -Filter "*.sln" -File
+                if ($sln_files.Count -gt 0) {
+                  Write-Host "✓ Found .sln file in $repo_name - keeping repository"
+                  $repo_name | Add-Content "valid_repos.txt" -Encoding UTF8
+                } else {
+                  Write-Host "✗ No .sln file found in base folder of $repo_name - Repo not built"
+                }
+              } catch {
+                Write-Host "Failed to clone $repo_name"
+              }
+            }
+          }
+          
+          # Show summary
+          if (Test-Path "valid_repos.txt") {
+            Write-Host "Valid repositories to compile:"
+            Get-Content "valid_repos.txt"
+          } else {
+            Write-Host "No valid repositories found with .sln files"
+          }
+        shell: pwsh
+
+      - name: Analyze dependency order
+        run: |
+          if (!(Test-Path "valid_repos.txt")) {
+            Write-Host "No valid repositories to analyze"
+            exit 0
+          }
+          
+          # Read all valid repositories
+          $validRepos = Get-Content "valid_repos.txt" | ForEach-Object { $_.Trim() }
+          Write-Host "Analyzing dependency order for $($validRepos.Count) repositories..."
+          
+          # Create dependency map
+          $dependencyMap = @{}
+          
+          foreach ($repo in $validRepos) {
+            $dependencyMap[$repo] = @()
+            $depsFile = "Repositories\$repo\dependencies.txt"
+            
+            if (Test-Path $depsFile) {
+              Write-Host "Found dependencies.txt in $repo"
+              $repoDeps = Get-Content $depsFile | ForEach-Object { 
+                $line = $_.Trim()
+                if (![string]::IsNullOrWhiteSpace($line) -and !$line.StartsWith("#")) {
+                  # Extract just the repo name from ORG/REPO format
+                  $repoName = $line.Split('/')[-1]
+                  return $repoName
+                }
+              } | Where-Object { $_ -ne $null }
+              
+              # Only include dependencies that are in our valid repos list
+              $validDeps = $repoDeps | Where-Object { $validRepos -contains $_ }
+              $dependencyMap[$repo] = $validDeps
+              
+              if ($validDeps.Count -gt 0) {
+                Write-Host "$repo depends on: $($validDeps -join ', ')"
+              } else {
+                Write-Host "$repo has no dependencies in current build set"
+              }
+            } else {
+              Write-Host "$repo has no dependencies.txt file"
+            }
+          }
+          
+          # Topological sort to determine build order
+          $script:buildOrder = @()
+          $script:visited = @{}
+          $script:visiting = @{}
+          
+          function Get-BuildOrder {
+            param([string]$repo)
+            
+            Write-Host "Processing $repo for build order..." -ForegroundColor Cyan
+            
+            if ($script:visiting.ContainsKey($repo)) {
+              Write-Host "⚠ Circular dependency detected involving $repo" -ForegroundColor Yellow
+              return $false
+            }
+            
+            if ($script:visited.ContainsKey($repo)) {
+              Write-Host "$repo already processed" -ForegroundColor Gray
+              return $true
+            }
+            
+            $script:visiting[$repo] = $true
+            Write-Host "Visiting dependencies of $repo..."
+            
+            # Visit all dependencies first
+            if ($dependencyMap.ContainsKey($repo) -and $dependencyMap[$repo].Count -gt 0) {
+              Write-Host "$repo has dependencies: $($dependencyMap[$repo] -join ', ')"
+              foreach ($dep in $dependencyMap[$repo]) {
+                if ($validRepos -contains $dep) {
+                  Write-Host "Processing dependency: $dep"
+                  $result = Get-BuildOrder -repo $dep
+                  if (-not $result) {
+                    Write-Host "Failed to process dependency $dep" -ForegroundColor Red
+                    return $false
+                  }
+                } else {
+                  Write-Host "Skipping dependency $dep (not in current build set)" -ForegroundColor Yellow
+                }
+              }
+            } else {
+              Write-Host "$repo has no dependencies"
+            }
+            
+            $script:visiting.Remove($repo)
+            $script:visited[$repo] = $true
+            $script:buildOrder += $repo
+            Write-Host "Added $repo to build order (position $($script:buildOrder.Count))" -ForegroundColor Green
+            return $true
+          }
+          
+          # Process all repositories
+          Write-Host "Starting topological sort for $($validRepos.Count) repositories..."
+          $sortSuccess = $true
+          foreach ($repo in $validRepos) {
+            if (-not $script:visited.ContainsKey($repo)) {
+              Write-Host "Processing root repository: $repo" -ForegroundColor Magenta
+              $result = Get-BuildOrder -repo $repo
+              if (-not $result) {
+                $sortSuccess = $false
+                    break
+              }
+            }
+          }
+          
+          if (-not $sortSuccess) {
+            Write-Host "⚠ Topological sort failed due to circular dependencies. Using original order." -ForegroundColor Yellow
+            $script:buildOrder = $validRepos
+          }
+          
+          $buildOrder = $script:buildOrder
+          
+          # Save build order
+          $buildOrder | Out-File "build_order.txt" -Encoding UTF8
+          
+          Write-Host "Determined build order:"
+          for ($i = 0; $i -lt $buildOrder.Count; $i++) {
+            Write-Host "  $($i + 1). $($buildOrder[$i])"
+          }
+        shell: pwsh
+
+      - name: Compile missing dependencies
+        run: |
+          if (!(Test-Path "build_order.txt")) {
+            Write-Host "No build order file found, checking for valid repositories..."
+            if (!(Test-Path "valid_repos.txt")) {
+              Write-Host "No valid repositories to compile"
+              exit 0
+            }
+            # Fallback to original order if build_order.txt doesn't exist
+            Get-Content "valid_repos.txt" | Out-File "build_order.txt" -Encoding UTF8
+          }
+          
+          # Read build order
+          $buildOrder = Get-Content "build_order.txt" | ForEach-Object { $_.Trim() } | Where-Object { ![string]::IsNullOrWhiteSpace($_) }
+          Write-Host "Building $($buildOrder.Count) repositories in dependency order..."
+          
+          # Compile each repository in the correct order
+          foreach ($repo_name in $buildOrder) {
+            Write-Host "Compiling repository: $repo_name"
+              
+              # Take snapshot of BHoM folder before build
+              $preFiles = @{}
+            if (Test-Path "$env:BHoMFolder") {
+              Get-ChildItem "$env:BHoMFolder" -Recurse -File | ForEach-Object {
+                  $preFiles[$_.FullName] = $_.LastWriteTime
+                }
+              }
+              
+            Push-Location "Repositories\$repo_name"
+            
+            try {
+              # Find .sln files and build using build.ps1
+              $slnFiles = Get-ChildItem -Filter "*.sln" -File
+              
+              if ($slnFiles.Count -eq 0) {
+                Write-Host "✗ No .sln file found in $repo_name" -ForegroundColor Red
+                exit 1
+              }
+              
+              foreach ($slnFile in $slnFiles) {
+                Write-Host "Building $($slnFile.Name) with Release configuration..."
+                
+                # Inline build logic (since we can't reference files from reusable workflow repo)
+                $buildSuccess = $false
+                
+                # Detect project type and build accordingly
+                $projects = @()
+                if ($slnFile.Name.EndsWith(".sln")) {
+                  # Parse solution for projects
+                  $slnContent = Get-Content $slnFile.FullName
+                  $projects = $slnContent | Select-String 'Project\(".*"\)\s*=\s*".*?",\s*"(.*?)",\s*".*?"' | ForEach-Object {
+                    $rel = $_.Matches[0].Groups[1].Value
+                    if ($rel -and $rel.EndsWith(".csproj", [StringComparison]::OrdinalIgnoreCase)) {
+                      Join-Path (Split-Path $slnFile.FullName -Parent) $rel
+                    }
+                  } | Where-Object { Test-Path $_ }
+                }
+                
+                # Check if any project has packages.config (legacy)
+                $hasPackagesConfig = $false
+                if ($projects.Count -gt 0) {
+                  foreach ($proj in $projects) {
+                    $pkgConfig = Join-Path (Split-Path $proj -Parent) "packages.config"
+                    if (Test-Path $pkgConfig) {
+                      $hasPackagesConfig = $true
+                      break
+                    }
+                  }
+                }
+                
+                # Check if all projects are SDK-style
+                $allSdk = $true
+                if ($projects.Count -gt 0 -and -not $hasPackagesConfig) {
+                  foreach ($proj in $projects) {
+                    try {
+                      [xml]$xml = Get-Content -LiteralPath $proj
+                      if (-not ($xml.Project -and $xml.Project.Sdk)) {
+                        $allSdk = $false
+                        break
+                      }
+                    } catch {
+                      $allSdk = $false
+                      break
+                    }
+                  }
+                }
+                
+                # Build using appropriate method
+                if ($hasPackagesConfig -or -not $allSdk) {
+                  Write-Host "Detected legacy project - using NuGet + MSBuild"
+                  nuget restore $slnFile.FullName -NonInteractive
+                  if ($LASTEXITCODE -eq 0) {
+                    msbuild $slnFile.FullName /restore /m /p:Configuration=Release /p:Platform="Any CPU" /verbosity:minimal /nologo
+                    $buildSuccess = ($LASTEXITCODE -eq 0)
+                  }
+                  } else {
+                  Write-Host "Detected SDK-style project - using dotnet"
+                  dotnet restore $slnFile.FullName
+                    if ($LASTEXITCODE -eq 0) {
+                    dotnet build $slnFile.FullName --configuration Release --no-restore --verbosity minimal
+                    $buildSuccess = ($LASTEXITCODE -eq 0)
+                  }
+                }
+                
+                if ($buildSuccess) {
+                  Write-Host "✓ Successfully built $($slnFile.Name)" -ForegroundColor Green
+                    } else {
+                  Write-Host "✗ Build failed for $($slnFile.Name)" -ForegroundColor Red
+                      exit 1
+                }
+              }
+              
+              # Capture changes in BHoM folder
+              $changedFiles = @()
+              if (Test-Path "$env:BHoMFolder") {
+                Get-ChildItem "$env:BHoMFolder" -Recurse -File | ForEach-Object {
+                  $file = $_.FullName
+                  $lastWrite = $_.LastWriteTime
+                  
+                  # File is new or modified
+                  if (-not $preFiles.ContainsKey($file) -or $preFiles[$file] -ne $lastWrite) {
+                    $changedFiles += $file
+                  }
+                }
+              }
+              
+              Write-Host "Dependency $repo_name modified/added $($changedFiles.Count) files in BHoM folder"
+              
+            } finally {
+              Pop-Location
+            }
+          }
+        shell: pwsh
+
+      - name: Upload dependencies artifact
+        id: build-summary
+        run: |
+          # Create dependencies artifact from BHoM folder
+          if (Test-Path "$env:BHoMFolder") {
+            Write-Host "Packaging dependencies from BHoM folder..."
+            
+            # Count files in BHoM folder
+            $files = Get-ChildItem "$env:BHoMFolder" -Recurse -File -ErrorAction SilentlyContinue
+            Write-Host "Found $($files.Count) files in BHoM folder to package as dependencies"
+            
+            if ($files.Count -gt 0) {
+              echo "dependencies-built=true" >> $env:GITHUB_OUTPUT
+            } else {
+              echo "dependencies-built=false" >> $env:GITHUB_OUTPUT
+              Write-Host "No files found in BHoM folder"
+            }
+          } else {
+            echo "dependencies-built=false" >> $env:GITHUB_OUTPUT
+            Write-Host "BHoM folder does not exist"
+          }
+        shell: pwsh
+
+      - name: Upload dependencies artifact
+        if: steps.build-summary.outputs.dependencies-built == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dependencies
+          path: ${{ env.BHoMFolder }}
+          retention-days: 3
+          compression-level: 6
+
+  build:
+    runs-on: windows-latest
+    needs: prepare-dependencies
+    strategy:
+      fail-fast: false
+      matrix:
+        build-configuration: ${{ fromJson(needs.prepare-dependencies.outputs.build-configurations) }}
+    env:
+      BHoMFolder: "C:\\ProgramData\\BHoM"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      
+      - name: Setup NuGet.exe for use with actions
+        uses: NuGet/setup-nuget@v2.0.1
+
+      - name: Create BHoM folder
+        run: New-Item -ItemType Directory -Force -Path "$env:BHoMFolder\Assemblies" | Out-Null
+        shell: pwsh
+
+      - name: Download dependencies
+        if: needs.prepare-dependencies.outputs.dependencies-built == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: Dependencies
+          path: ${{ env.BHoMFolder }}
+
+      - name: Copy libs folder to BHoM assemblies
+        run: |
+          if (Test-Path "libs") {
+            Write-Host "Found libs folder, copying DLL files to BHoM assemblies..."
+            $libsDlls = Get-ChildItem "libs" -Filter "*.dll" -File -Recurse
+            
+            if ($libsDlls.Count -gt 0) {
+              Write-Host "Found $($libsDlls.Count) DLL files in libs folder:"
+              foreach ($dll in $libsDlls) {
+                $destinationPath = Join-Path "$env:BHoMFolder\Assemblies" $dll.Name
+                Copy-Item $dll.FullName -Destination $destinationPath -Force
+                Write-Host "  Copied: $($dll.Name)"
+              }
+              Write-Host "✓ Successfully copied $($libsDlls.Count) DLL files from libs folder"
+            } else {
+              Write-Host "No DLL files found in libs folder"
+            }
+          } else {
+            Write-Host "No libs folder found, skipping DLL copy"
+          }
+        shell: pwsh
+
+      - name: Take pre-build snapshot
+        run: |
+          # Take snapshot of BHoM folder before build
+          $preFiles = @{}
+          if (Test-Path "$env:BHoMFolder") {
+            Get-ChildItem "$env:BHoMFolder" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+              $preFiles[$_.FullName] = @{
+                LastWriteTime = $_.LastWriteTime
+                Length = $_.Length
+              }
+            }
+          }
+          
+          # Save pre-build state to JSON file
+          $preFiles | ConvertTo-Json -Depth 3 | Out-File "pre-build-state.json" -Encoding UTF8
+          Write-Host "Captured pre-build state: $($preFiles.Count) files"
+
+      - name: Restore and build project
+        run: |
+          # Find the .sln file in the current directory
+          $sln_files = Get-ChildItem -Filter "*.sln" -File
+          
+          if ($sln_files.Count -eq 0) {
+            Write-Host "✗ No .sln file found in root directory" -ForegroundColor Red
+            exit 1
+          }
+          
+          if ($sln_files.Count -gt 1) {
+            Write-Host "⚠ Multiple .sln files found, using the first one: $($sln_files[0].Name)" -ForegroundColor Yellow
+          }
+          
+          $sln_file = $sln_files[0]
+          $configuration = "${{ matrix.build-configuration }}"
+          Write-Host "Building solution: $($sln_file.Name) with configuration: $configuration" -ForegroundColor Cyan
+          
+          # Inline build logic (since we can't reference files from reusable workflow repo)
+          $buildSuccess = $false
+          
+          # Detect project type and build accordingly
+          $projects = @()
+          if ($sln_file.Name.EndsWith(".sln")) {
+            # Parse solution for projects
+            $slnContent = Get-Content $sln_file.FullName
+            $projects = $slnContent | Select-String 'Project\(".*"\)\s*=\s*".*?",\s*"(.*?)",\s*".*?"' | ForEach-Object {
+              $rel = $_.Matches[0].Groups[1].Value
+              if ($rel -and $rel.EndsWith(".csproj", [StringComparison]::OrdinalIgnoreCase)) {
+                Join-Path (Split-Path $sln_file.FullName -Parent) $rel
+              }
+            } | Where-Object { Test-Path $_ }
+          }
+          
+          # Check if any project has packages.config (legacy)
+          $hasPackagesConfig = $false
+          if ($projects.Count -gt 0) {
+            foreach ($proj in $projects) {
+              $pkgConfig = Join-Path (Split-Path $proj -Parent) "packages.config"
+              if (Test-Path $pkgConfig) {
+                $hasPackagesConfig = $true
+                break
+              }
+            }
+          }
+          
+          # Check if all projects are SDK-style
+          $allSdk = $true
+          if ($projects.Count -gt 0 -and -not $hasPackagesConfig) {
+            foreach ($proj in $projects) {
+              try {
+                [xml]$xml = Get-Content -LiteralPath $proj
+                if (-not ($xml.Project -and $xml.Project.Sdk)) {
+                  $allSdk = $false
+                  break
+                }
+              } catch {
+                $allSdk = $false
+                break
+              }
+            }
+          }
+          
+          # Build using appropriate method
+          if ($hasPackagesConfig -or -not $allSdk) {
+            Write-Host "Detected legacy project - using NuGet + MSBuild"
+            nuget restore $sln_file.FullName -NonInteractive
+            if ($LASTEXITCODE -eq 0) {
+              msbuild $sln_file.FullName /restore /m /p:Configuration=$configuration /p:Platform="Any CPU" /verbosity:minimal /nologo
+              $buildSuccess = ($LASTEXITCODE -eq 0)
+            }
+            } else {
+            Write-Host "Detected SDK-style project - using dotnet"
+            dotnet restore $sln_file.FullName
+            if ($LASTEXITCODE -eq 0) {
+              dotnet build $sln_file.FullName --configuration $configuration --no-restore --verbosity minimal
+              $buildSuccess = ($LASTEXITCODE -eq 0)
+            }
+          }
+          
+          if ($buildSuccess) {
+            Write-Host "✓ Build SUCCEEDED for $($sln_file.Name)" -ForegroundColor Green
+          } else {
+            Write-Host "✗ Build FAILED for $($sln_file.Name)" -ForegroundColor Red
+            exit 1
+          }
+        shell: pwsh
+
+      - name: Package build outputs
+        id: package-outputs
+        run: |
+          # Load pre-build state
+          $preFiles = @{}
+          if (Test-Path "pre-build-state.json") {
+            $preFiles = Get-Content "pre-build-state.json" -Raw | ConvertFrom-Json -AsHashtable
+          }
+          
+          # Create artifact folder
+          New-Item -ItemType Directory -Force -Path "artifact"
+          
+          # Find all changed/new files in BHoM folder
+          $changedFiles = @()
+          if (Test-Path "$env:BHoMFolder") {
+            Get-ChildItem "$env:BHoMFolder" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+              $file = $_.FullName
+              $lastWrite = $_.LastWriteTime
+              $length = $_.Length
+              
+              # Check if file is new or modified
+              $isChanged = $false
+              if (-not $preFiles.ContainsKey($file)) {
+                # New file
+                $isChanged = $true
+                Write-Host "New file: $($file.Replace("$env:BHoMFolder\", ''))"
+              } elseif ($preFiles[$file].LastWriteTime -ne $lastWrite -or $preFiles[$file].Length -ne $length) {
+                # Modified file
+                $isChanged = $true
+                Write-Host "Modified file: $($file.Replace("$env:BHoMFolder\", ''))"
+              }
+              
+              if ($isChanged) {
+                $changedFiles += $file
+              }
+            }
+          }
+          
+          Write-Host "Total changed/new files: $($changedFiles.Count)"
+          
+          # Copy changed files to artifact, preserving directory structure
+          foreach ($file in $changedFiles) {
+            $relativePath = $file.Replace("$env:BHoMFolder\", "")
+            $destPath = Join-Path "artifact" $relativePath
+            $destDir = Split-Path $destPath -Parent
+            
+            # Create destination directory if it doesn't exist
+            if (-not (Test-Path $destDir)) {
+              New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+            }
+            
+            # Copy the file
+            Copy-Item $file -Destination $destPath -Force
+          }
+          
+          # Also include any files from libs folder that were copied to BHoM assemblies during build
+          if (Test-Path "libs") {
+            Write-Host "Checking for libs files that may have been copied during build..."
+            $libsFiles = Get-ChildItem "libs" -Filter "*" -File -Recurse
+            
+            foreach ($libFile in $libsFiles) {
+              $assemblyPath = Join-Path "$env:BHoMFolder\Assemblies" $libFile.Name
+              if (Test-Path $assemblyPath) {
+                # Check if this file from libs exists in BHoM assemblies and include it in artifact
+                $relativePath = "Assemblies\$($libFile.Name)"
+                $destPath = Join-Path "artifact" $relativePath
+                $destDir = Split-Path $destPath -Parent
+                
+                # Create destination directory if it doesn't exist
+                if (-not (Test-Path $destDir)) {
+                  New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+                }
+                
+                # Copy the file from BHoM assemblies (not from libs, to get the version that was actually used)
+                Copy-Item $assemblyPath -Destination $destPath -Force
+                Write-Host "  Included libs file in artifact: $($libFile.Name)"
+              }
+            }
+          }
+          
+          if ($changedFiles.Count -eq 0) {
+            Write-Host "No files were changed in $env:BHoMFolder during build"
+            # Create empty marker file so artifact isn't empty
+            "No files changed during build" | Out-File "artifact\no-changes.txt"
+          }
+          
+          # Collect only the DLL files that were built and changed in this run
+          Write-Host "Filtering changed files for DLL assemblies only..."
+          
+          $updatedDlls = @()
+          foreach ($file in $changedFiles) {
+            if ($file.EndsWith(".dll", [System.StringComparison]::OrdinalIgnoreCase) -and 
+                $file.Contains("$env:BHoMFolder\Assemblies\")) {
+              $updatedDlls += $file
+              Write-Host "  Found updated assembly: $($file.Replace("$env:BHoMFolder\", ''))"
+            }
+          }
+          
+          if ($updatedDlls.Count -gt 0) {
+            $updatedDllsString = $updatedDlls -join ';'
+            Write-Host "Found $($updatedDlls.Count) updated DLL files for test parameters"
+            echo "updated-assemblies=$updatedDllsString" >> $env:GITHUB_OUTPUT
+            
+            # Save updated assemblies info to BHoM folder with build config suffix
+            $updatedDllsString | Out-File "$env:BHoMFolder\updated-assemblies-${{ matrix.build-configuration }}.txt" -Encoding UTF8
+          } else {
+            Write-Host "No updated DLL files found in assemblies folder"
+            echo "updated-assemblies=" >> $env:GITHUB_OUTPUT
+            
+            # Create empty file for consistency
+            "" | Out-File "$env:BHoMFolder\updated-assemblies-${{ matrix.build-configuration }}.txt" -Encoding UTF8
+          }
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-outputs-${{ inputs.branch_name }}-${{ matrix.build-configuration }}
+          path: artifact/
+          retention-days: 90
+          compression-level: 6
+
+      - name: Upload BHoM Assemblies
+        if: contains(fromJson(needs.prepare-dependencies.outputs.release-configurations), matrix.build-configuration)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bhom-assemblies-${{ matrix.build-configuration }}
+          path: ${{ env.BHoMFolder }}
+          retention-days: 1
+          compression-level: 6
+
+  tests:
+    runs-on: windows-latest
+    needs: [prepare-dependencies, build]
+    env:
+      BHoMFolder: "C:\\ProgramData\\BHoM"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check GitHub App secrets
+        id: check-app-secrets
+        run: |
+          if [ -n "${{ vars.GH_BOT_APP_ID }}" ] && [ -n "${{ secrets.GH_BOT_PRIVATE_KEY }}" ]; then
+            echo "app-secrets-available=true" >> $GITHUB_OUTPUT
+          else
+            echo "app-secrets-available=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Generate GitHub App Token
+        id: generate-token
+        if: steps.check-app-secrets.outputs.app-secrets-available == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.GH_BOT_APP_ID }}
+          private-key: ${{ secrets.GH_BOT_PRIVATE_KEY }}
+
+      - name: Create BHoM directory
+        run: New-Item -ItemType Directory -Force -Path "$env:BHoMFolder\Assemblies" | Out-Null
+        shell: pwsh
+
+      - name: Download and merge BHoM Assemblies from all release builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bhom-assemblies-*
+          path: ${{ env.BHoMFolder }}
+          merge-multiple: true
+
+      - name: Download Test Toolkit Tests
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.GH_TOKEN || github.token }}
+        run: |
+          Write-Host "Downloading Test Toolkit Tests from BHoM/Test_Toolkit..."
+          
+          $targetRepo = "BHoM/Test_Toolkit"
+          $branchName = '${{ inputs.branch_name }}'
+          $artifactName = "Tests"
+          
+          # Branch priority order
+          $branchesToTry = @(
+            $branchName,
+            "develop", 
+            "Test_Toolkit-InvestigateRunningAllChecksThroughNUnit"
+          )
+          
+          Write-Host "Branch priority order: $($branchesToTry -join ', ')"
+          
+          $foundArtifact = $false
+          
+          foreach ($testBranch in $branchesToTry) {
+            if ($foundArtifact) { break }
+            
+            Write-Host "Trying branch: $testBranch"
+            
+            try {
+              # Get recent successful runs from this branch
+              $runsResponse = gh api "/repos/$targetRepo/actions/runs?status=success&per_page=10" 2>$null
+              if ($runsResponse) {
+                $runs = $runsResponse | ConvertFrom-Json
+                $branchRuns = $runs.workflow_runs | Where-Object { $_.head_branch -eq $testBranch }
+                
+                if ($branchRuns -and $branchRuns.Count -gt 0) {
+                  Write-Host "Found $($branchRuns.Count) successful runs on branch '$testBranch'"
+                  
+                  # Check the most recent run for artifacts
+                  $latestRun = $branchRuns[0]
+                  Write-Host "Checking latest run: $($latestRun.id)"
+                  
+                  $artifactsResponse = gh api "/repos/$targetRepo/actions/runs/$($latestRun.id)/artifacts" 2>$null
+                  if ($artifactsResponse) {
+                    $artifacts = $artifactsResponse | ConvertFrom-Json
+                    $targetArtifact = $artifacts.artifacts | Where-Object { $_.name -eq $artifactName }
+                    
+                    if ($targetArtifact) {
+                      Write-Host "✓ Found artifact '$artifactName' in run $($latestRun.id) on branch '$testBranch'"
+                      
+                      # Download the artifact
+                      Write-Host "Downloading artifact..."
+                      gh api "/repos/$targetRepo/actions/artifacts/$($targetArtifact.id)/zip" > "$artifactName.zip"
+                      
+                      if (Test-Path "$artifactName.zip") {
+                        Write-Host "✓ Successfully downloaded $artifactName.zip"
+                        
+                        # Create temporary extraction directory
+                        $tempExtractDir = "temp_extract"
+                        if (Test-Path $tempExtractDir) {
+                          Remove-Item $tempExtractDir -Recurse -Force
+                        }
+                        New-Item -ItemType Directory -Force -Path $tempExtractDir | Out-Null
+                        
+                        # Extract the artifact to temporary directory first
+                        Write-Host "Extracting artifact to temporary directory..."
+                        Expand-Archive "$artifactName.zip" -DestinationPath $tempExtractDir -Force
+                        
+                        # Handle _Tests_ folder content
+                        if (Test-Path "$tempExtractDir\_Tests_") {
+                          Write-Host "Found _Tests_ folder in artifact, copying content to _Tests_ folder..."
+                          
+                          # Create/recreate _Tests_ directory
+                          if (Test-Path "_Tests_") {
+                            Write-Host "Removing existing _Tests_ folder..."
+                            Remove-Item "_Tests_" -Recurse -Force
+                          }
+                          New-Item -ItemType Directory -Force -Path "_Tests_" | Out-Null
+                          
+                          # Copy content from extracted _Tests_ folder
+                          $testsContent = Get-ChildItem "$tempExtractDir\_Tests_" -Recurse
+                          if ($testsContent.Count -gt 0) {
+                            Copy-Item "$tempExtractDir\_Tests_\*" -Destination "_Tests_" -Recurse -Force
+                            Write-Host "✓ Copied $($testsContent.Count) items from artifact _Tests_ folder"
+                          } else {
+                            Write-Host "Artifact _Tests_ folder is empty"
+                          }
+                        } else {
+                          Write-Host "No _Tests_ folder found in artifact - creating empty _Tests_ folder"
+                          if (Test-Path "_Tests_") {
+                            Remove-Item "_Tests_" -Recurse -Force
+                          }
+                          New-Item -ItemType Directory -Force -Path "_Tests_" | Out-Null
+                        }
+                        
+                        # Handle StartupHook folder content
+                        if (Test-Path "$tempExtractDir\StartupHook") {
+                          Write-Host "Found StartupHook folder in artifact, copying content to BHoM/Assemblies..."
+                          $startupHookContent = Get-ChildItem "$tempExtractDir\StartupHook" -Recurse -File
+                          
+                          if ($startupHookContent.Count -gt 0) {
+                            Write-Host "Found $($startupHookContent.Count) files in StartupHook folder:"
+                            foreach ($file in $startupHookContent) {
+                              $destinationPath = Join-Path "$env:BHoMFolder\Assemblies" $file.Name
+                              Copy-Item $file.FullName -Destination $destinationPath -Force
+                              Write-Host "  Copied: $($file.Name) to BHoM/Assemblies"
+                            }
+                            Write-Host "✓ Successfully copied $($startupHookContent.Count) StartupHook files to BHoM/Assemblies"
+                          } else {
+                            Write-Host "StartupHook folder is empty"
+                          }
+                        } else {
+                          Write-Host "No StartupHook folder found in artifact"
+                        }
+                        
+                        # Clean up temporary directory
+                        Remove-Item $tempExtractDir -Recurse -Force
+                        
+                        # Clean up the downloaded zip
+                        Remove-Item "$artifactName.zip" -Force
+                        
+                        # Show what we extracted
+                        Write-Host "✓ Test artifacts extracted to _Tests_ folder:"
+                        $testFiles = Get-ChildItem "_Tests_" -Recurse -File | Select-Object -First 5
+                        foreach ($file in $testFiles) {
+                          $testsPath = (Get-Location).Path + '\_Tests_\'
+                          $relativePath = $file.FullName.Replace($testsPath, "")
+                          Write-Host "  $relativePath"
+                        }
+                        if ((Get-ChildItem "_Tests_" -Recurse -File).Count -gt 5) {
+                          Write-Host "  ... and $((Get-ChildItem "_Tests_" -Recurse -File).Count - 5) more files"
+                        }
+                        
+                        $foundArtifact = $true
+                        break
+                      } else {
+                        Write-Host "⚠ Failed to download artifact from branch '$testBranch'"
+                      }
+                    } else {
+                      Write-Host "→ No artifact '$artifactName' found in latest run on branch '$testBranch'"
+                    }
+                  } else {
+                    Write-Host "→ Could not get artifacts for latest run on branch '$testBranch'"
+                  }
+                } else {
+                  Write-Host "→ No successful runs found on branch '$testBranch'"
+                }
+              } else {
+                Write-Host "→ Could not access runs for branch '$testBranch'"
+              }
+            } catch {
+              Write-Host "→ Error checking branch '$testBranch': $($_.Exception.Message)"
+            }
+          }
+          
+          if (-not $foundArtifact) {
+            Write-Host "✗ Could not find Tests artifact from any branch" -ForegroundColor Red
+            Write-Host "Tried branches: $($branchesToTry -join ', ')"
+            
+            # Create empty _Tests_ folder so the workflow can continue
+            if (-not (Test-Path "_Tests_")) {
+              New-Item -ItemType Directory -Force -Path "_Tests_" | Out-Null
+              Write-Host "Created empty _Tests_ folder"
+            }
+          }
+        shell: pwsh
+
+      - name: Identify tests
+        id: identify-tests
+        run: |
+          Write-Host "Searching for test DLLs in _Tests_ folder..."
+          
+          if (-not (Test-Path "_Tests_")) {
+            Write-Host "✗ _Tests_ folder not found" -ForegroundColor Red
+            exit 1
+          }
+          
+          # Find all DLL files in _Tests_ folder that contain unit tests
+          $testDlls = @()
+          $allDlls = Get-ChildItem "_Tests_" -Filter "*.dll" -File -Recurse
+          
+          if ($allDlls.Count -eq 0) {
+            Write-Host "✗ No DLL files found in _Tests_ folder" -ForegroundColor Red
+            exit 1
+          }
+          
+          Write-Host "Found $($allDlls.Count) DLL files, pre-filtering for NUnit references..."
+          
+          foreach ($dll in $allDlls) {
+            Write-Host "Checking: $($dll.Name)"
+            
+            # Skip known non-test DLLs
+            $dllBaseName = $dll.BaseName
+            if ($dllBaseName -eq "NUnit_Engine" -or $dllBaseName -eq "TestSetup_Engine" -or 
+                $dllBaseName -eq "testhost" -or $dllBaseName -eq "testcentric.engine.metadata" -or
+                $dllBaseName.StartsWith("System.") -or $dllBaseName.StartsWith("Microsoft.") -or
+                $dllBaseName.StartsWith("nunit.", [System.StringComparison]::OrdinalIgnoreCase) -or
+                $dllBaseName.StartsWith("NUnit3.") -or
+                $dllBaseName.StartsWith("Newtonsoft.") -or $dllBaseName.StartsWith("NuGet.") -or
+                $dllBaseName.EndsWith("_oM") -or $dllBaseName.EndsWith("_Engine")) {
+              Write-Host "  - Skipping known non-test DLL: $($dll.Name)" -ForegroundColor Gray
+              continue
+            }
+            
+            # Pre-filter: Check if DLL references nunit.framework.dll using reflection
+            $hasNUnitReference = $false
+            
+            try {
+              # Method 1: Try using System.Reflection.MetadataLoadContext (more modern approach)
+              Add-Type -AssemblyName System.Reflection.MetadataLoadContext -ErrorAction SilentlyContinue
+              if ([System.Reflection.MetadataLoadContext] -ne $null) {
+                $resolver = [System.Reflection.PathAssemblyResolver]::new(@($dll.Directory.FullName, [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()))
+                $mlc = [System.Reflection.MetadataLoadContext]::new($resolver)
+                try {
+                  $assembly = $mlc.LoadFromAssemblyPath($dll.FullName)
+                  $referencedAssemblies = $assembly.GetReferencedAssemblies()
+                  $hasNUnitReference = $referencedAssemblies | Where-Object { $_.Name -eq "nunit.framework" }
+                  if ($hasNUnitReference) {
+                    Write-Host "  ✓ NUnit framework reference found" -ForegroundColor Cyan
+                  } else {
+                    Write-Host "  - No NUnit framework reference found, skipping" -ForegroundColor Gray
+                  }
+                } finally {
+                  $mlc.Dispose()
+                }
+              } else {
+                throw "MetadataLoadContext not available"
+              }
+            } catch {
+              # Method 2: Fallback to checking file dependencies using PowerShell and .NET reflection
+              try {
+                # Load assembly in a separate AppDomain context to avoid locking
+                $assemblyBytes = [System.IO.File]::ReadAllBytes($dll.FullName)
+                $assembly = [System.Reflection.Assembly]::Load($assemblyBytes)
+                $referencedAssemblies = $assembly.GetReferencedAssemblies()
+                $hasNUnitReference = $referencedAssemblies | Where-Object { $_.Name -eq "nunit.framework" }
+                if ($hasNUnitReference) {
+                  Write-Host "  ✓ NUnit framework reference found (via fallback method)" -ForegroundColor Cyan
+                } else {
+                  Write-Host "  - No NUnit framework reference found, skipping" -ForegroundColor Gray
+                }
+              } catch {
+                Write-Host "  - Could not determine NUnit reference for $($dll.Name), skipping" -ForegroundColor Yellow
+                $hasNUnitReference = $false
+              }
+            }
+            
+            # Skip if no NUnit reference found
+            if (-not $hasNUnitReference) {
+              continue
+            }
+            
+            # If we found NUnit reference, assume it contains tests
+            Write-Host "✓ Found NUnit reference in $($dll.Name) - assuming it contains tests" -ForegroundColor Green
+            $testDlls += @{
+              Name = $dll.BaseName
+              FullPath = $dll.FullName
+              TestCount = "unknown" # We can't determine exact count without dotnet CLI
+            }
+          }
+          
+          if ($testDlls.Count -eq 0) {
+            Write-Host "✗ No test DLLs found in _Tests_ folder" -ForegroundColor Red
+            exit 1
+          }
+          
+          Write-Host "✓ Identified $($testDlls.Count) test DLL(s):"
+          foreach ($testDll in $testDlls) {
+            Write-Host "  - $($testDll.Name) (contains NUnit tests)"
+          }
+          
+          # Convert to JSON for output
+          $testDllsJson = $testDlls | ConvertTo-Json -Compress
+          echo "test-dlls=$testDllsJson" >> $env:GITHUB_OUTPUT
+          
+          # Also output just the names for matrix strategy
+          $testDllNames = $testDlls | ForEach-Object { $_.Name }
+          $testDllNamesJson = $testDllNames | ConvertTo-Json -Compress
+          echo "test-dll-names=$testDllNamesJson" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      - name: Run individual tests
+        env:
+          DOTNET_STARTUP_HOOKS: ${{ env.BHoMFolder }}\Assemblies\TestStartupHook.dll
+        run: |
+          $testDlls = '${{ steps.identify-tests.outputs.test-dlls }}' | ConvertFrom-Json
+          
+          if (-not $testDlls -or $testDlls.Count -eq 0) {
+            Write-Host "✗ No test DLLs identified" -ForegroundColor Red
+            exit 1
+          }
+          
+          # Create test-results directory
+          New-Item -ItemType Directory -Force -Path "test-results" | Out-Null
+          
+          # Find all updated-assemblies-*.txt files from release builds
+          $updatedAssembliesFiles = Get-ChildItem "$env:BHoMFolder" -Filter "updated-assemblies-*.txt" -File
+          $changedFiles = '${{ needs.prepare-dependencies.outputs.changed-files }}'
+          
+          $overallSuccess = $true
+          $testResults = @()
+          
+          if ($updatedAssembliesFiles.Count -gt 0) {
+            Write-Host "Found $($updatedAssembliesFiles.Count) release build(s) to test"
+            
+            # Run tests once per release build
+            foreach ($updatedAssembliesFile in $updatedAssembliesFiles) {
+              # Extract build configuration from filename (updated-assemblies-Release.txt -> Release)
+              $buildConfig = $updatedAssembliesFile.BaseName -replace "^updated-assemblies-", ""
+              Write-Host "`n=== Running tests for release build: $buildConfig ===" -ForegroundColor Cyan
+              
+              # Read the updated assemblies for this build
+              $updatedAssemblies = Get-Content $updatedAssembliesFile.FullName -Raw
+              $updatedAssemblies = $updatedAssemblies.Trim()
+              
+              $hasTestParams = $updatedAssemblies -or $changedFiles
+              
+              foreach ($testDll in $testDlls) {
+                Write-Host "Running tests for: $($testDll.Name) (build: $buildConfig)"
+                
+                $logFileName = "test-results-$($testDll.Name)-$buildConfig.trx"
+                Write-Host "Log file: $logFileName"
+                
+                try {
+                  if ($hasTestParams) {
+                    Write-Host "Running with test parameters for $buildConfig"
+                    # Use Start-Process to avoid PowerShell escaping issues
+                    $processArgs = @(
+                      "test"
+                      "$($testDll.FullPath)"
+                      "--verbosity"
+                      "normal"
+                      "--logger"
+                      "trx;LogFileName=$logFileName"
+                      "--results-directory"
+                      "test-results"
+                    )
+                    
+                    # Add test parameters as separate arguments
+                    $processArgs += "--"
+                    
+                    # Add UpdatedAssemblies parameter if available
+                    if ($updatedAssemblies) {
+                      $processArgs += "TestRunParameters.Parameter(name=`"UpdatedAssemblies`", value=`"$updatedAssemblies`")"
+                    }
+                    
+                    # Add UpdatedFiles parameter if available
+                    if ($changedFiles) {
+                      $processArgs += "TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
+                    }
+                    
+                    Write-Host "Executing: dotnet $($processArgs -join ' ')"
+                    & dotnet @processArgs
+                  } else {
+                    Write-Host "Running without additional parameters for $buildConfig"
+                    dotnet test $($testDll.FullPath) --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
+                  }
+                  
+                  if ($LASTEXITCODE -eq 0) {
+                    Write-Host "✓ Tests passed for $($testDll.Name) ($buildConfig)" -ForegroundColor Green
+                    $testResults += @{ Name = "$($testDll.Name)-$buildConfig"; Status = "Passed"; LogFile = $logFileName }
+                  } else {
+                    Write-Host "⚠ Some tests failed for $($testDll.Name) ($buildConfig)" -ForegroundColor Yellow
+                    $overallSuccess = $false
+                    $testResults += @{ Name = "$($testDll.Name)-$buildConfig"; Status = "Failed"; LogFile = $logFileName }
+                  }
+                } catch {
+                  Write-Host "✗ Error running tests for $($testDll.Name) ($buildConfig): $($_.Exception.Message)" -ForegroundColor Red
+                  $overallSuccess = $false
+                  $testResults += @{ Name = "$($testDll.Name)-$buildConfig"; Status = "Error"; LogFile = $logFileName }
+                }
+              }
+              
+              # Clean up the updated assemblies file for this build
+              Remove-Item $updatedAssembliesFile.FullName -Force
+            }
+          } else {
+            Write-Host "No release builds found - running tests without specific assemblies parameters"
+            
+            foreach ($testDll in $testDlls) {
+              Write-Host "Running tests for: $($testDll.Name)"
+              
+              $logFileName = "test-results-$($testDll.Name).trx"
+              Write-Host "Log file: $logFileName"
+              
+              try {
+                if ($changedFiles) {
+                  Write-Host "Running with changed files parameter only"
+                  $processArgs = @(
+                    "test"
+                    "$($testDll.FullPath)"
+                    "--verbosity"
+                    "normal"
+                    "--logger"
+                    "trx;LogFileName=$logFileName"
+                    "--results-directory"
+                    "test-results"
+                    "--"
+                    "TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
+                  )
+                  
+                  Write-Host "Executing: dotnet $($processArgs -join ' ')"
+                  & dotnet @processArgs
+                } else {
+                  Write-Host "Running without additional parameters"
+                  dotnet test $($testDll.FullPath) --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
+                }
+                
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✓ Tests passed for $($testDll.Name)" -ForegroundColor Green
+                  $testResults += @{ Name = $testDll.Name; Status = "Passed"; LogFile = $logFileName }
+                } else {
+                  Write-Host "⚠ Some tests failed for $($testDll.Name)" -ForegroundColor Yellow
+                  $overallSuccess = $false
+                  $testResults += @{ Name = $testDll.Name; Status = "Failed"; LogFile = $logFileName }
+                }
+              } catch {
+                Write-Host "✗ Error running tests for $($testDll.Name): $($_.Exception.Message)" -ForegroundColor Red
+                $overallSuccess = $false
+                $testResults += @{ Name = $testDll.Name; Status = "Error"; LogFile = $logFileName }
+              }
+            }
+          }
+          
+          Write-Host "Test execution summary:"
+          foreach ($result in $testResults) {
+            $status = switch ($result.Status) {
+              "Passed" { "✓ PASSED" }
+              "Failed" { "⚠ FAILED" }
+              "Error"  { "✗ ERROR" }
+            }
+            Write-Host "  $($result.Name): $status"
+          }
+          
+          if (-not $overallSuccess) {
+            Write-Host "⚠ Some test DLLs had failures" -ForegroundColor Yellow
+            exit 1
+          } else {
+            Write-Host "✓ All test DLLs passed" -ForegroundColor Green
+          }
+        shell: pwsh
+
+      - name: Merge TRX files by test DLL
+        if: always()
+        run: |
+          Write-Host "Merging TRX files by test DLL..."
+          
+          # Get all TRX files
+          $trxFiles = Get-ChildItem "test-results" -Filter "*.trx" -File
+          
+          if ($trxFiles.Count -eq 0) {
+            Write-Host "No TRX files found to merge"
+            exit 0
+          }
+          
+          # Group TRX files by test DLL (remove build config suffix)
+          $testDllGroups = @{}
+          foreach ($trxFile in $trxFiles) {
+            # Extract test DLL name from filename like "test-results-TestDll-Release.trx" -> "TestDll"
+            if ($trxFile.BaseName -match "^test-results-(.+?)(?:-[^-]+)?$") {
+              $testDllName = $matches[1]
+              
+              if (-not $testDllGroups.ContainsKey($testDllName)) {
+                $testDllGroups[$testDllName] = @()
+              }
+              $testDllGroups[$testDllName] += $trxFile
+              
+              Write-Host "Grouped $($trxFile.Name) under test DLL: $testDllName"
+            }
+          }
+          
+          # Merge TRX files for each test DLL
+          foreach ($testDllName in $testDllGroups.Keys) {
+            $trxFilesForDll = $testDllGroups[$testDllName]
+            $finalTrxFile = "test-results/test-results-$testDllName.trx"
+            
+            Write-Host "Merging $($trxFilesForDll.Count) TRX file(s) for $testDllName into $finalTrxFile"
+            
+            if ($trxFilesForDll.Count -eq 1) {
+              # Single file - just rename it
+              Copy-Item $trxFilesForDll[0].FullName -Destination $finalTrxFile -Force
+              Write-Host "✓ Renamed single TRX file for $testDllName"
+            } else {
+              # Multiple files - use dotnet test-results merge (if available) or simple XML merge
+              try {
+                # Try using dotnet test-results merge command (requires .NET 6+)
+                $sourceFiles = $trxFilesForDll | ForEach-Object { $_.FullName }
+                $mergeArgs = @("test-results", "merge") + $sourceFiles + @("--output", $finalTrxFile)
+                
+                Write-Host "Attempting to merge using: dotnet $($mergeArgs -join ' ')"
+                & dotnet @mergeArgs
+                
+                if ($LASTEXITCODE -eq 0) {
+                  Write-Host "✓ Successfully merged TRX files for $testDllName using dotnet test-results merge"
+                } else {
+                  throw "dotnet test-results merge failed with exit code $LASTEXITCODE"
+                }
+              } catch {
+                Write-Host "dotnet test-results merge not available or failed, using first file only: $($_.Exception.Message)" -ForegroundColor Yellow
+                # Fallback: just use the first (or last) TRX file
+                Copy-Item $trxFilesForDll[-1].FullName -Destination $finalTrxFile -Force
+                Write-Host "✓ Used last TRX file for $testDllName as fallback"
+              }
+            }
+            
+            # Clean up original TRX files
+            foreach ($originalFile in $trxFilesForDll) {
+              if ($originalFile.FullName -ne $finalTrxFile) {
+                Remove-Item $originalFile.FullName -Force
+              }
+            }
+          }
+          
+          Write-Host "✓ TRX file merging completed"
+        shell: pwsh
+
+      - name: Generate Dynamic Test Reports Action
+        if: always()
+        run: |
+          $testDllNames = '${{ steps.identify-tests.outputs.test-dll-names }}' | ConvertFrom-Json
+          
+          if (-not $testDllNames -or $testDllNames.Count -eq 0) {
+            Write-Host "No test DLLs to create reports for"
+            exit 0
+          }
+          
+          # Create the directory for the composite action
+          $actionDir = ".github/actions/dynamic-test-reports"
+          New-Item -ItemType Directory -Force -Path $actionDir | Out-Null
+          
+          # Start building the composite action YAML
+          $actionYaml = "name: 'Dynamic Test Reports'`n"
+          $actionYaml += "description: 'Generate test reports for all identified test DLLs'`n"
+          $actionYaml += "runs:`n"
+          $actionYaml += "  using: 'composite'`n"
+          $actionYaml += "  steps:`n"
+          
+          # Add a step for each test DLL that has a TRX file
+          foreach ($testDllName in $testDllNames) {
+            $trxFile = "test-results/test-results-$testDllName.trx"
+            if (Test-Path $trxFile) {
+              Write-Host "Adding test report step for: $testDllName"
+              
+              $stepYaml = "    - name: Test Report - $testDllName`n"
+              $stepYaml += "      if: always() && hashFiles('test-results/**/test-results-$testDllName.trx') != ''`n"
+              $stepYaml += "      uses: dorny/test-reporter@v2`n"
+              $stepYaml += "      with:`n"
+              $stepYaml += "        name: Test Results - $testDllName`n"
+              $stepYaml += "        path: test-results/**/test-results-$testDllName.trx`n"
+              $stepYaml += "        reporter: dotnet-trx`n"
+              $stepYaml += "        list-tests: failed`n"
+              $stepYaml += "        list-suites: all`n"
+              $stepYaml += "        badge-title: $testDllName`n"
+              $stepYaml += "        use-actions-summary: false`n"
+              $stepYaml += "      env:`n"
+              $stepYaml += "        GITHUB_TOKEN: `${{ github.token }}`n"
+              $actionYaml += "`n" + $stepYaml
+            } else {
+              Write-Host "⚠ No TRX file found for $testDllName - skipping report" -ForegroundColor Yellow
+            }
+          }
+          
+          # Write the composite action file
+          $actionYaml | Out-File -FilePath "$actionDir/action.yml" -Encoding UTF8
+          
+          Write-Host "✓ Generated dynamic composite action with individual dorny/test-reporter steps"
+          Write-Host "Action file created at: $actionDir/action.yml"
+        shell: pwsh
+
+      - name: Execute Dynamic Test Reports
+        if: always()
+        uses: ./.github/actions/dynamic-test-reports
