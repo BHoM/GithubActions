@@ -1533,7 +1533,7 @@ jobs:
               foreach ($testDll in $testDlls) {
                 Write-Host "Running tests for: $($testDll.Name) (build: $buildConfig)"
                 
-                $logFileName = "test-results-$($testDll.Name)-$buildConfig.trx"
+                $logFileName = "test-results-$($testDll.Name)-$buildConfig.xml"
                 Write-Host "Log file: $logFileName"
                 
                 try {
@@ -1546,7 +1546,7 @@ jobs:
                       "--verbosity"
                       "normal"
                       "--logger"
-                      "trx;LogFileName=$logFileName"
+                      "nunit;LogFileName=$logFileName"
                       "--results-directory"
                       "test-results"
                     )
@@ -1568,7 +1568,7 @@ jobs:
                     & dotnet @processArgs
                   } else {
                     Write-Host "Running without additional parameters for $buildConfig"
-                    dotnet test $($testDll.FullPath) --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
+                    dotnet test $($testDll.FullPath) --verbosity normal --logger "nunit;LogFileName=$logFileName" --results-directory test-results
                   }
                   
                   if ($LASTEXITCODE -eq 0) {
@@ -1595,7 +1595,7 @@ jobs:
             foreach ($testDll in $testDlls) {
               Write-Host "Running tests for: $($testDll.Name)"
               
-              $logFileName = "test-results-$($testDll.Name).trx"
+              $logFileName = "test-results-$($testDll.Name).xml"
               Write-Host "Log file: $logFileName"
               
               try {
@@ -1607,7 +1607,7 @@ jobs:
                     "--verbosity"
                     "normal"
                     "--logger"
-                    "trx;LogFileName=$logFileName"
+                    "nunit;LogFileName=$logFileName"
                     "--results-directory"
                     "test-results"
                     "--"
@@ -1618,7 +1618,7 @@ jobs:
                   & dotnet @processArgs
                 } else {
                   Write-Host "Running without additional parameters"
-                  dotnet test $($testDll.FullPath) --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
+                  dotnet test $($testDll.FullPath) --verbosity normal --logger "nunit;LogFileName=$logFileName" --results-directory test-results
                 }
                 
                 if ($LASTEXITCODE -eq 0) {
@@ -1655,78 +1655,63 @@ jobs:
           }
         shell: pwsh
 
-      - name: Merge TRX files by test DLL
+      - name: Merge XML files by test DLL
         if: always()
         run: |
-          Write-Host "Merging TRX files by test DLL..."
+          Write-Host "Merging XML files by test DLL..."
           
-          # Get all TRX files
-          $trxFiles = Get-ChildItem "test-results" -Filter "*.trx" -File
+          # Get all XML files
+          $xmlFiles = Get-ChildItem "test-results" -Filter "*.xml" -File
           
-          if ($trxFiles.Count -eq 0) {
-            Write-Host "No TRX files found to merge"
+          if ($xmlFiles.Count -eq 0) {
+            Write-Host "No XML files found to merge"
             exit 0
           }
           
-          # Group TRX files by test DLL (remove build config suffix)
+          # Group XML files by test DLL (remove build config suffix)
           $testDllGroups = @{}
-          foreach ($trxFile in $trxFiles) {
-            # Extract test DLL name from filename like "test-results-TestDll-Release.trx" -> "TestDll"
-            if ($trxFile.BaseName -match "^test-results-(.+?)(?:-[^-]+)?$") {
+          foreach ($xmlFile in $xmlFiles) {
+            # Extract test DLL name from filename like "test-results-TestDll-Release.xml" -> "TestDll"
+            if ($xmlFile.BaseName -match "^test-results-(.+?)(?:-[^-]+)?$") {
               $testDllName = $matches[1]
               
               if (-not $testDllGroups.ContainsKey($testDllName)) {
                 $testDllGroups[$testDllName] = @()
               }
-              $testDllGroups[$testDllName] += $trxFile
+              $testDllGroups[$testDllName] += $xmlFile
               
-              Write-Host "Grouped $($trxFile.Name) under test DLL: $testDllName"
+              Write-Host "Grouped $($xmlFile.Name) under test DLL: $testDllName"
             }
           }
           
-          # Merge TRX files for each test DLL
+          # Merge XML files for each test DLL
           foreach ($testDllName in $testDllGroups.Keys) {
-            $trxFilesForDll = $testDllGroups[$testDllName]
-            $finalTrxFile = "test-results/test-results-$testDllName.trx"
+            $xmlFilesForDll = $testDllGroups[$testDllName]
+            $finalXmlFile = "test-results/test-results-$testDllName.xml"
             
-            Write-Host "Merging $($trxFilesForDll.Count) TRX file(s) for $testDllName into $finalTrxFile"
+            Write-Host "Merging $($xmlFilesForDll.Count) XML file(s) for $testDllName into $finalXmlFile"
             
-            if ($trxFilesForDll.Count -eq 1) {
+            if ($xmlFilesForDll.Count -eq 1) {
               # Single file - just rename it
-              Copy-Item $trxFilesForDll[0].FullName -Destination $finalTrxFile -Force
-              Write-Host "✓ Renamed single TRX file for $testDllName"
+              Copy-Item $xmlFilesForDll[0].FullName -Destination $finalXmlFile -Force
+              Write-Host "✓ Renamed single XML file for $testDllName"
             } else {
-              # Multiple files - use dotnet test-results merge (if available) or simple XML merge
-              try {
-                # Try using dotnet test-results merge command (requires .NET 6+)
-                $sourceFiles = $trxFilesForDll | ForEach-Object { $_.FullName }
-                $mergeArgs = @("test-results", "merge") + $sourceFiles + @("--output", $finalTrxFile)
-                
-                Write-Host "Attempting to merge using: dotnet $($mergeArgs -join ' ')"
-                & dotnet @mergeArgs
-                
-                if ($LASTEXITCODE -eq 0) {
-                  Write-Host "✓ Successfully merged TRX files for $testDllName using dotnet test-results merge"
-                } else {
-                  throw "dotnet test-results merge failed with exit code $LASTEXITCODE"
-                }
-              } catch {
-                Write-Host "dotnet test-results merge not available or failed, using first file only: $($_.Exception.Message)" -ForegroundColor Yellow
-                # Fallback: just use the first (or last) TRX file
-                Copy-Item $trxFilesForDll[-1].FullName -Destination $finalTrxFile -Force
-                Write-Host "✓ Used last TRX file for $testDllName as fallback"
-              }
+              # Multiple files - for NUnit XML, we'll use the last file as fallback
+              # NUnit XML merging is more complex than TRX and not supported by dotnet CLI
+              Write-Host "Multiple NUnit XML files found, using last file as fallback" -ForegroundColor Yellow
+              Copy-Item $xmlFilesForDll[-1].FullName -Destination $finalXmlFile -Force
+              Write-Host "✓ Used last XML file for $testDllName as fallback"
             }
             
-            # Clean up original TRX files
-            foreach ($originalFile in $trxFilesForDll) {
-              if ($originalFile.FullName -ne $finalTrxFile) {
+            # Clean up original XML files
+            foreach ($originalFile in $xmlFilesForDll) {
+              if ($originalFile.FullName -ne $finalXmlFile) {
                 Remove-Item $originalFile.FullName -Force
               }
             }
           }
           
-          Write-Host "✓ TRX file merging completed"
+          Write-Host "✓ XML file merging completed"
         shell: pwsh
 
       - name: Generate Dynamic Test Reports Action
@@ -1750,19 +1735,19 @@ jobs:
           $actionYaml += "  using: 'composite'`n"
           $actionYaml += "  steps:`n"
           
-          # Add a step for each test DLL that has a TRX file
+          # Add a step for each test DLL that has an XML file
           foreach ($testDllName in $testDllNames) {
-            $trxFile = "test-results/test-results-$testDllName.trx"
-            if (Test-Path $trxFile) {
+            $xmlFile = "test-results/test-results-$testDllName.xml"
+            if (Test-Path $xmlFile) {
               Write-Host "Adding test report step for: $testDllName"
               
               $stepYaml = "    - name: Test Report - $testDllName`n"
-              $stepYaml += "      if: always() && hashFiles('test-results/**/test-results-$testDllName.trx') != ''`n"
+              $stepYaml += "      if: always() && hashFiles('test-results/**/test-results-$testDllName.xml') != ''`n"
               $stepYaml += "      uses: dorny/test-reporter@v2`n"
               $stepYaml += "      with:`n"
               $stepYaml += "        name: Test Results - $testDllName`n"
-              $stepYaml += "        path: test-results/**/test-results-$testDllName.trx`n"
-              $stepYaml += "        reporter: dotnet-trx`n"
+              $stepYaml += "        path: test-results/**/test-results-$testDllName.xml`n"
+              $stepYaml += "        reporter: dotnet-nunit`n"
               $stepYaml += "        list-tests: failed`n"
               $stepYaml += "        list-suites: all`n"
               $stepYaml += "        badge-title: $testDllName`n"
@@ -1771,7 +1756,7 @@ jobs:
               $stepYaml += "        GITHUB_TOKEN: `${{ github.token }}`n"
               $actionYaml += "`n" + $stepYaml
             } else {
-              Write-Host "⚠ No TRX file found for $testDllName - skipping report" -ForegroundColor Yellow
+              Write-Host "⚠ No XML file found for $testDllName - skipping report" -ForegroundColor Yellow
             }
           }
           
