@@ -307,13 +307,13 @@ jobs:
               
               found=false
               wait_attempts=0
-              max_wait_attempts=10
+              max_wait_attempts=30
               
               # Check for artifacts, even if workflow is still running
               while [ $wait_attempts -le $max_wait_attempts ] && [ "$found" = "false" ]; do
                 if [ $wait_attempts -gt 0 ]; then
                   echo "Wait attempt $wait_attempts/$max_wait_attempts - checking for artifacts..."
-                  sleep 10
+                  sleep 15
                 fi
                 
                 # Check if artifacts are available
@@ -323,36 +323,66 @@ jobs:
                   if [ "$artifact_count" -gt 0 ]; then
                     echo "Run has $artifact_count artifacts available"
                     
-                    # Look for the specific artifacts we need
+                    # Look for artifacts with priority: matching configs first, then fallback to "Release"
+                    artifacts_found=0
+                    
+                    # First priority: Try to find artifacts that match our release configurations
                     for release_config in $(echo "$release_configs" | jq -r '.[]'); do
                       artifact_name="build-outputs-$target_branch-$release_config"
-                      echo "Looking for artifact: $artifact_name"
+                      echo "Looking for matching configuration artifact: $artifact_name"
                       
                       artifact_id=$(echo "$artifacts_response" | jq -r --arg name "$artifact_name" '.artifacts[] | select(.name == $name) | .id')
                       
                       if [ -n "$artifact_id" ] && [ "$artifact_id" != "null" ]; then
-                        echo "✓ Found artifact: $artifact_name from $dep"
+                        echo "✓ Found matching artifact: $artifact_name from $dep"
                         dep_safe=$(echo "$dep" | tr '/' '_')
                         
-                        # Download and extract
-                        gh api "/repos/$dep/actions/artifacts/$artifact_id/zip" > "${dep_safe}_artifact.zip"
-                        mkdir -p "dependencies/$dep_safe"
-                        unzip -q "${dep_safe}_artifact.zip" -d "dependencies/$dep_safe"
+                        # Download and extract to unique folder for this config
+                        gh api "/repos/$dep/actions/artifacts/$artifact_id/zip" > "${dep_safe}_${release_config}_artifact.zip"
+                        mkdir -p "dependencies/${dep_safe}_${release_config}"
+                        unzip -q "${dep_safe}_${release_config}_artifact.zip" -d "dependencies/${dep_safe}_${release_config}"
                         
                         # Copy to BHoM folder
-                        if [ -d "dependencies/$dep_safe" ]; then
-                          cp -r dependencies/$dep_safe/* "$BHoMFolder/" 2>/dev/null || true
+                        if [ -d "dependencies/${dep_safe}_${release_config}" ]; then
+                          cp -r dependencies/${dep_safe}_${release_config}/* "$BHoMFolder/" 2>/dev/null || true
                         fi
                         
-                        echo "✓ Successfully downloaded artifact for $dep for configuration $release_config"
-                        downloaded_artifacts=$(echo "$downloaded_artifacts" | jq --arg dep "$dep" '. + [$dep]')
+                        echo "✓ Successfully downloaded matching artifact for $dep configuration $release_config"
+                        artifacts_found=$((artifacts_found + 1))
                         found=true
-                        break
                       fi
                     done
                     
+                    # Second priority: If no matching configs found, try fallback to "Release"
+                    if [ "$artifacts_found" -eq 0 ]; then
+                      fallback_artifact="build-outputs-$target_branch-Release"
+                      echo "No matching configurations found, trying fallback: $fallback_artifact"
+                      
+                      fallback_id=$(echo "$artifacts_response" | jq -r --arg name "$fallback_artifact" '.artifacts[] | select(.name == $name) | .id')
+                      
+                      if [ -n "$fallback_id" ] && [ "$fallback_id" != "null" ]; then
+                        echo "✓ Found fallback artifact: $fallback_artifact from $dep"
+                        dep_safe=$(echo "$dep" | tr '/' '_')
+                        
+                        # Download and extract fallback artifact
+                        gh api "/repos/$dep/actions/artifacts/$fallback_id/zip" > "${dep_safe}_Release_artifact.zip"
+                        mkdir -p "dependencies/${dep_safe}_Release"
+                        unzip -q "${dep_safe}_Release_artifact.zip" -d "dependencies/${dep_safe}_Release"
+                        
+                        # Copy to BHoM folder
+                        if [ -d "dependencies/${dep_safe}_Release" ]; then
+                          cp -r dependencies/${dep_safe}_Release/* "$BHoMFolder/" 2>/dev/null || true
+                        fi
+                        
+                        echo "✓ Successfully downloaded fallback Release artifact for $dep"
+                        artifacts_found=1
+                        found=true
+                      fi
+                    fi
+                    
                     if [ "$found" = "true" ]; then
-                        break
+                      echo "✓ Downloaded $artifacts_found artifact(s) for $dep"
+                      break
                     fi
                   fi
                 fi
