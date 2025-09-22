@@ -1494,7 +1494,23 @@ jobs:
           
           # Find all updated-assemblies-*.txt files from release builds
           $updatedAssembliesFiles = Get-ChildItem "$env:BHoMFolder" -Filter "updated-assemblies-*.txt" -File
-          $changedFiles = '${{ needs.setup-configurations-and-dependencies.outputs.changed-files }}'
+          $changedFilesRaw = '${{ needs.setup-configurations-and-dependencies.outputs.changed-files }}'
+          
+          # Convert relative paths to absolute Windows paths
+          $changedFiles = ""
+          if ($changedFilesRaw) {
+            $workspaceRoot = Get-Location
+            $relativePaths = $changedFilesRaw -split ';'
+            $absolutePaths = @()
+            foreach ($relativePath in $relativePaths) {
+              if ($relativePath.Trim()) {
+                $absolutePath = Join-Path $workspaceRoot $relativePath.Trim()
+                $absolutePaths += $absolutePath
+              }
+            }
+            $changedFiles = $absolutePaths -join ';'
+            Write-Host "Converted $($relativePaths.Count) relative paths to absolute Windows paths"
+          }
           
           $overallSuccess = $true
           $testResults = @()
