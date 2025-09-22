@@ -1133,7 +1133,7 @@ jobs:
 
   tests:
     runs-on: windows-latest
-    needs: [setup-configurations-and-dependencies, build-dependencies-with-no-artifacts, build]
+    needs: [setup-configurations-and-dependencies, build]
     env:
       BHoMFolder: "C:\\ProgramData\\BHoM"
     steps:
