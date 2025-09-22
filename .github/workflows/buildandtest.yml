@@ -1134,6 +1134,7 @@ jobs:
   tests:
     runs-on: windows-latest
     needs: [setup-configurations-and-dependencies, build]
+    if: always() && (needs.build.result == 'success')
     env:
       BHoMFolder: "C:\\ProgramData\\BHoM"
     steps:
