@@ -1192,6 +1192,32 @@ jobs:
         run: New-Item -ItemType Directory -Force -Path "$env:BHoMFolder\Assemblies" | Out-Null
         shell: pwsh
 
+      - name: Install NUnit Test Logger
+        run: |
+          # Create a temporary project to install the NUnit Test Logger package
+          # This makes the logger available for dotnet test commands
+          New-Item -ItemType Directory -Force -Path "temp-logger-project" | Out-Null
+          Push-Location "temp-logger-project"
+          
+          # Create a minimal project file
+          @"
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <TargetFramework>net8.0</TargetFramework>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="NUnitXml.TestLogger" Version="3.0.127" />
+            </ItemGroup>
+          </Project>
+          "@ | Out-File "temp.csproj"
+          
+          # Restore to download the logger
+          dotnet restore
+          
+          Pop-Location
+          Write-Host "✓ NUnit Test Logger installed and available"
+        shell: pwsh
+
       - name: Download and merge BHoM Assemblies from all release builds
         uses: actions/download-artifact@v4
         with:
@@ -1735,6 +1761,9 @@ jobs:
           $actionYaml += "  using: 'composite'`n"
           $actionYaml += "  steps:`n"
           
+          # Track if we add any steps
+          $stepsAdded = 0
+          
           # Add a step for each test DLL that has an XML file
           foreach ($testDllName in $testDllNames) {
             $xmlFile = "test-results/test-results-$testDllName.xml"
@@ -1755,9 +1784,18 @@ jobs:
               $stepYaml += "      env:`n"
               $stepYaml += "        GITHUB_TOKEN: `${{ github.token }}`n"
               $actionYaml += "`n" + $stepYaml
+              $stepsAdded++
             } else {
               Write-Host "⚠ No XML file found for $testDllName - skipping report" -ForegroundColor Yellow
             }
+          }
+          
+          # If no steps were added, add a dummy step to make valid YAML
+          if ($stepsAdded -eq 0) {
+            Write-Host "No test result files found, adding placeholder step"
+            $actionYaml += "`n    - name: No Test Results Found`n"
+            $actionYaml += "      shell: bash`n"
+            $actionYaml += "      run: echo 'No test result files were found to generate reports'`n"
           }
           
           # Write the composite action file
