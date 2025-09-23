@@ -456,7 +456,7 @@ jobs:
         with:
           name: Dependencies
           path: ${{ env.BHoMFolder }}
-          retention-days: 3
+          retention-days: 1
           compression-level: 6
 
       - name: Upload incomplete dependencies artifact
@@ -465,7 +465,7 @@ jobs:
         with:
           name: Dependencies-Incomplete
           path: ${{ env.BHoMFolder }}
-          retention-days: 3
+          retention-days: 1
           compression-level: 6
 
   build-dependencies-with-no-artifacts:
@@ -869,7 +869,7 @@ jobs:
         with:
           name: Dependencies
           path: ${{ env.BHoMFolder }}
-          retention-days: 3
+          retention-days: 1
           compression-level: 6
 
   build:
@@ -1151,18 +1151,9 @@ jobs:
           retention-days: 90
           compression-level: 6
 
-      - name: Upload BHoM Assemblies
-        if: contains(fromJson(needs.setup-configurations-and-dependencies.outputs.release-configurations), matrix.build-configuration)
-        uses: actions/upload-artifact@v4
-        with:
-          name: bhom-assemblies-${{ matrix.build-configuration }}
-          path: ${{ env.BHoMFolder }}
-          retention-days: 1
-          compression-level: 6
-
   tests:
     runs-on: windows-latest
-    needs: [setup-configurations-and-dependencies, build]
+    needs: [setup-configurations-and-dependencies, build, build-dependencies-with-no-artifacts]
     if: always() && (needs.build.result == 'success')
     env:
       BHoMFolder: "C:\\ProgramData\\BHoM"
@@ -1173,7 +1164,7 @@ jobs:
       - name: Check GitHub App secrets
         id: check-app-secrets
         run: |
-          if [ -n "${{ vars.GH_BOT_APP_ID }}" ] && [ -n "${{ secrets.GH_BOT_PRIVATE_KEY }}" ]; then
+          if [ -n "${{ secrets.APP_ID }}" ] && [ -n "${{ secrets.APP_PRIVATE_KEY }}" ]; then
             echo "app-secrets-available=true" >> $GITHUB_OUTPUT
           else
             echo "app-secrets-available=false" >> $GITHUB_OUTPUT
@@ -1185,17 +1176,25 @@ jobs:
         if: steps.check-app-secrets.outputs.app-secrets-available == 'true'
         uses: actions/create-github-app-token@v1
         with:
-          app-id: ${{ vars.GH_BOT_APP_ID }}
-          private-key: ${{ secrets.GH_BOT_PRIVATE_KEY }}
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
 
       - name: Create BHoM directory
         run: New-Item -ItemType Directory -Force -Path "$env:BHoMFolder\Assemblies" | Out-Null
         shell: pwsh
 
+      - name: Download dependencies
+        if: needs.setup-configurations-and-dependencies.outputs.dependencies-built == 'complete' || needs.build-dependencies-with-no-artifacts.outputs.dependencies-built == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: Dependencies
+          path: ${{ env.BHoMFolder }}
+
       - name: Download and merge BHoM Assemblies from all release builds
         uses: actions/download-artifact@v4
         with:
-          pattern: bhom-assemblies-*
+          pattern: bhom-assemblies-${{ inputs.branch_name }}-Release*
           path: ${{ env.BHoMFolder }}
           merge-multiple: true
 
