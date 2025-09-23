@@ -1696,23 +1696,110 @@ jobs:
               Copy-Item $trxFilesForDll[0].FullName -Destination $finalTrxFile -Force
               Write-Host "✓ Renamed single TRX file for $testDllName"
             } else {
-              # Multiple files - use dotnet test-results merge (if available) or simple XML merge
+              # Multiple files - merge TRX files using XML manipulation
               try {
-                # Try using dotnet test-results merge command (requires .NET 6+)
-                $sourceFiles = $trxFilesForDll | ForEach-Object { $_.FullName }
-                $mergeArgs = @("test-results", "merge") + $sourceFiles + @("--output", $finalTrxFile)
+                Write-Host "Merging $($trxFilesForDll.Count) TRX files using XML manipulation..."
                 
-                Write-Host "Attempting to merge using: dotnet $($mergeArgs -join ' ')"
-                & dotnet @mergeArgs
+                # Load the first TRX file as the base
+                [xml]$mergedXml = Get-Content $trxFilesForDll[0].FullName
+                $mergedResults = $mergedXml.TestRun.Results
+                $mergedDefinitions = $mergedXml.TestRun.TestDefinitions
+                $mergedEntries = $mergedXml.TestRun.TestEntries
                 
-                if ($LASTEXITCODE -eq 0) {
-                  Write-Host "✓ Successfully merged TRX files for $testDllName using dotnet test-results merge"
-                } else {
-                  throw "dotnet test-results merge failed with exit code $LASTEXITCODE"
+                # Initialize counters from the first file
+                $totalTests = [int]$mergedXml.TestRun.ResultSummary.Counters.total
+                $executedTests = [int]$mergedXml.TestRun.ResultSummary.Counters.executed
+                $passedTests = [int]$mergedXml.TestRun.ResultSummary.Counters.passed
+                $failedTests = [int]$mergedXml.TestRun.ResultSummary.Counters.failed
+                $errorTests = [int]$mergedXml.TestRun.ResultSummary.Counters.error
+                $timeoutTests = [int]$mergedXml.TestRun.ResultSummary.Counters.timeout
+                $abortedTests = [int]$mergedXml.TestRun.ResultSummary.Counters.aborted
+                $inconclusiveTests = [int]$mergedXml.TestRun.ResultSummary.Counters.inconclusive
+                $passedButRunAbortedTests = [int]$mergedXml.TestRun.ResultSummary.Counters.passedButRunAborted
+                $notRunnableTests = [int]$mergedXml.TestRun.ResultSummary.Counters.notRunnable
+                $notExecutedTests = [int]$mergedXml.TestRun.ResultSummary.Counters.notExecuted
+                $disconnectedTests = [int]$mergedXml.TestRun.ResultSummary.Counters.disconnected
+                $warningTests = [int]$mergedXml.TestRun.ResultSummary.Counters.warning
+                $completedTests = [int]$mergedXml.TestRun.ResultSummary.Counters.completed
+                $inProgressTests = [int]$mergedXml.TestRun.ResultSummary.Counters.inProgress
+                $pendingTests = [int]$mergedXml.TestRun.ResultSummary.Counters.pending
+                
+                # Merge additional TRX files
+                for ($i = 1; $i -lt $trxFilesForDll.Count; $i++) {
+                  [xml]$additionalXml = Get-Content $trxFilesForDll[$i].FullName
+                  
+                  # Merge Results
+                  foreach ($result in $additionalXml.TestRun.Results.UnitTestResult) {
+                    $importedResult = $mergedXml.ImportNode($result, $true)
+                    $mergedResults.AppendChild($importedResult) | Out-Null
+                  }
+                  
+                  # Merge TestDefinitions
+                  foreach ($definition in $additionalXml.TestRun.TestDefinitions.UnitTest) {
+                    $importedDefinition = $mergedXml.ImportNode($definition, $true)
+                    $mergedDefinitions.AppendChild($importedDefinition) | Out-Null
+                  }
+                  
+                  # Merge TestEntries
+                  foreach ($entry in $additionalXml.TestRun.TestEntries.TestEntry) {
+                    $importedEntry = $mergedXml.ImportNode($entry, $true)
+                    $mergedEntries.AppendChild($importedEntry) | Out-Null
+                  }
+                  
+                  # Add counters
+                  $totalTests += [int]$additionalXml.TestRun.ResultSummary.Counters.total
+                  $executedTests += [int]$additionalXml.TestRun.ResultSummary.Counters.executed
+                  $passedTests += [int]$additionalXml.TestRun.ResultSummary.Counters.passed
+                  $failedTests += [int]$additionalXml.TestRun.ResultSummary.Counters.failed
+                  $errorTests += [int]$additionalXml.TestRun.ResultSummary.Counters.error
+                  $timeoutTests += [int]$additionalXml.TestRun.ResultSummary.Counters.timeout
+                  $abortedTests += [int]$additionalXml.TestRun.ResultSummary.Counters.aborted
+                  $inconclusiveTests += [int]$additionalXml.TestRun.ResultSummary.Counters.inconclusive
+                  $passedButRunAbortedTests += [int]$additionalXml.TestRun.ResultSummary.Counters.passedButRunAborted
+                  $notRunnableTests += [int]$additionalXml.TestRun.ResultSummary.Counters.notRunnable
+                  $notExecutedTests += [int]$additionalXml.TestRun.ResultSummary.Counters.notExecuted
+                  $disconnectedTests += [int]$additionalXml.TestRun.ResultSummary.Counters.disconnected
+                  $warningTests += [int]$additionalXml.TestRun.ResultSummary.Counters.warning
+                  $completedTests += [int]$additionalXml.TestRun.ResultSummary.Counters.completed
+                  $inProgressTests += [int]$additionalXml.TestRun.ResultSummary.Counters.inProgress
+                  $pendingTests += [int]$additionalXml.TestRun.ResultSummary.Counters.pending
                 }
+                
+                # Update merged counters
+                $mergedXml.TestRun.ResultSummary.Counters.total = $totalTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.executed = $executedTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.passed = $passedTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.failed = $failedTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.error = $errorTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.timeout = $timeoutTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.aborted = $abortedTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.inconclusive = $inconclusiveTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.passedButRunAborted = $passedButRunAbortedTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.notRunnable = $notRunnableTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.notExecuted = $notExecutedTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.disconnected = $disconnectedTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.warning = $warningTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.completed = $completedTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.inProgress = $inProgressTests.ToString()
+                $mergedXml.TestRun.ResultSummary.Counters.pending = $pendingTests.ToString()
+                
+                # Update the outcome based on merged results
+                if ($failedTests -gt 0 -or $errorTests -gt 0 -or $timeoutTests -gt 0 -or $abortedTests -gt 0) {
+                  $mergedXml.TestRun.ResultSummary.outcome = "Failed"
+                } else {
+                  $mergedXml.TestRun.ResultSummary.outcome = "Completed"
+                }
+                
+                # Save the merged TRX file
+                $mergedXml.Save($finalTrxFile)
+                
+                Write-Host "✓ Successfully merged $($trxFilesForDll.Count) TRX files for $testDllName"
+                Write-Host "  Total tests: $totalTests, Passed: $passedTests, Failed: $failedTests"
+                
               } catch {
-                Write-Host "dotnet test-results merge not available or failed, using first file only: $($_.Exception.Message)" -ForegroundColor Yellow
-                # Fallback: just use the first (or last) TRX file
+                Write-Host "⚠ XML merge failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                Write-Host "Falling back to using the last TRX file for $testDllName"
+                # Fallback: just use the last TRX file
                 Copy-Item $trxFilesForDll[-1].FullName -Destination $finalTrxFile -Force
                 Write-Host "✓ Used last TRX file for $testDllName as fallback"
               }
