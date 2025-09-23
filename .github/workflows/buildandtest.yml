@@ -1849,7 +1849,7 @@ jobs:
               $stepYaml += "        name: Test Results - $testDllName`n"
               $stepYaml += "        path: test-results/**/test-results-$testDllName.trx`n"
               $stepYaml += "        reporter: dotnet-trx`n"
-              $stepYaml += "        list-tests: all`n"
+              $stepYaml += "        list-tests: failed`n"
               $stepYaml += "        list-suites: all`n"
               $stepYaml += "        badge-title: $testDllName`n"
               $stepYaml += "        use-actions-summary: false`n"
