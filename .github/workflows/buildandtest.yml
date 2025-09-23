@@ -1194,7 +1194,7 @@ jobs:
       - name: Download and merge BHoM Assemblies from all release builds
         uses: actions/download-artifact@v4
         with:
-          pattern: bhom-assemblies-${{ inputs.branch_name }}-Release*
+          pattern: build-outputs-${{ inputs.branch_name }}-Release*
           path: ${{ env.BHoMFolder }}
           merge-multiple: true
 
