@@ -1650,9 +1650,22 @@ jobs:
             Write-Host "Merging $($trxFilesForDll.Count) TRX file(s) for $testDllName into $finalTrxFile"
             
             if ($trxFilesForDll.Count -eq 1) {
-              # Single file - just rename it
-              Copy-Item $trxFilesForDll[0].FullName -Destination $finalTrxFile -Force
-              Write-Host "✓ Renamed single TRX file for $testDllName"
+              # Single file - check if it already has the correct name
+              $sourceFile = $trxFilesForDll[0].FullName
+              $sourceName = $trxFilesForDll[0].Name
+              $expectedName = "test-results-$testDllName.trx"
+              
+              if ($sourceName -eq $expectedName) {
+                Write-Host "✓ Single TRX file already has correct name: $sourceName"
+              } else {
+                # Rename it to the expected name
+                Copy-Item $sourceFile -Destination $finalTrxFile -Force
+                # Remove the original file if it's different from the destination
+                if ($sourceFile -ne $finalTrxFile) {
+                  Remove-Item $sourceFile -Force
+                }
+                Write-Host "✓ Renamed single TRX file from $sourceName to $expectedName"
+              }
             } else {
               # Multiple files - merge TRX files using XML manipulation
               try {
