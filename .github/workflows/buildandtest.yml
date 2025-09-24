@@ -1366,114 +1366,73 @@ jobs:
       - name: Identify tests
         id: identify-tests
         run: |
-          Write-Host "Searching for test DLLs in _Tests_ folder..."
+          Write-Host "Reading test DLLs from TestDlls.txt file..."
           
           if (-not (Test-Path "_Tests_")) {
             Write-Host "✗ _Tests_ folder not found" -ForegroundColor Red
             exit 1
           }
           
-          # Find all DLL files in _Tests_ folder that contain unit tests
-          $testDlls = @()
-          $allDlls = Get-ChildItem "_Tests_" -Filter "*.dll" -File -Recurse
-          
-          if ($allDlls.Count -eq 0) {
-            Write-Host "✗ No DLL files found in _Tests_ folder" -ForegroundColor Red
+          $testDllsFile = "_Tests_\TestDlls.txt"
+          if (-not (Test-Path $testDllsFile)) {
+            Write-Host "✗ TestDlls.txt file not found in _Tests_ folder" -ForegroundColor Red
             exit 1
           }
           
-          Write-Host "Found $($allDlls.Count) DLL files, pre-filtering for NUnit references..."
+          # Read test DLL names from TestDlls.txt file
+          $testDllNames = Get-Content $testDllsFile | Where-Object { 
+            ![string]::IsNullOrWhiteSpace($_) 
+          } | ForEach-Object { $_.Trim() }
           
-          foreach ($dll in $allDlls) {
-            Write-Host "Checking: $($dll.Name)"
-            
-            # Skip known non-test DLLs
-            $dllBaseName = $dll.BaseName
-            if ($dllBaseName -eq "NUnit_Engine" -or $dllBaseName -eq "TestSetup_Engine" -or 
-                $dllBaseName -eq "testhost" -or $dllBaseName -eq "testcentric.engine.metadata" -or
-                $dllBaseName.StartsWith("System.") -or $dllBaseName.StartsWith("Microsoft.") -or
-                $dllBaseName.StartsWith("nunit.", [System.StringComparison]::OrdinalIgnoreCase) -or
-                $dllBaseName.StartsWith("NUnit3.") -or
-                $dllBaseName.StartsWith("Newtonsoft.") -or $dllBaseName.StartsWith("NuGet.") -or
-                $dllBaseName.EndsWith("_oM") -or $dllBaseName.EndsWith("_Engine")) {
-              Write-Host "  - Skipping known non-test DLL: $($dll.Name)" -ForegroundColor Gray
-              continue
+          if ($testDllNames.Count -eq 0) {
+            Write-Host "✗ No test DLL names found in TestDlls.txt" -ForegroundColor Red
+            exit 1
+          }
+          
+          Write-Host "Found $($testDllNames.Count) test DLL name(s) in TestDlls.txt:"
+          foreach ($dllName in $testDllNames) {
+            Write-Host "  - $dllName"
+          }
+          
+          # Build test DLLs array with full paths
+          $testDlls = @()
+          foreach ($dllName in $testDllNames) {
+            # Remove .dll extension if present to get base name
+            $baseName = if ($dllName.EndsWith(".dll", [System.StringComparison]::OrdinalIgnoreCase)) {
+              $dllName.Substring(0, $dllName.Length - 4)
+            } else {
+              $dllName
             }
             
-            # Pre-filter: Check if DLL references nunit.framework.dll using reflection
-            $hasNUnitReference = $false
+            # Find the DLL file in _Tests_ folder
+            $dllFile = Get-ChildItem "_Tests_" -Filter "$baseName.dll" -File -Recurse | Select-Object -First 1
             
-            try {
-              # Method 1: Try using System.Reflection.MetadataLoadContext (more modern approach)
-              Add-Type -AssemblyName System.Reflection.MetadataLoadContext -ErrorAction SilentlyContinue
-              if ([System.Reflection.MetadataLoadContext] -ne $null) {
-                $resolver = [System.Reflection.PathAssemblyResolver]::new(@($dll.Directory.FullName, [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()))
-                $mlc = [System.Reflection.MetadataLoadContext]::new($resolver)
-                try {
-                  $assembly = $mlc.LoadFromAssemblyPath($dll.FullName)
-                  $referencedAssemblies = $assembly.GetReferencedAssemblies()
-                  $hasNUnitReference = $referencedAssemblies | Where-Object { $_.Name -eq "nunit.framework" }
-                  if ($hasNUnitReference) {
-                    Write-Host "  ✓ NUnit framework reference found" -ForegroundColor Cyan
-                  } else {
-                    Write-Host "  - No NUnit framework reference found, skipping" -ForegroundColor Gray
-                  }
-                } finally {
-                  $mlc.Dispose()
-                }
-              } else {
-                throw "MetadataLoadContext not available"
+            if ($dllFile) {
+              Write-Host "✓ Found test DLL: $($dllFile.FullName)"
+              $testDlls += @{
+                Name = $baseName
+                FullPath = $dllFile.FullName
+                TestCount = "unknown"
               }
-            } catch {
-              # Method 2: Fallback to checking file dependencies using PowerShell and .NET reflection
-              try {
-                # Load assembly in a separate AppDomain context to avoid locking
-                $assemblyBytes = [System.IO.File]::ReadAllBytes($dll.FullName)
-                $assembly = [System.Reflection.Assembly]::Load($assemblyBytes)
-                $referencedAssemblies = $assembly.GetReferencedAssemblies()
-                $hasNUnitReference = $referencedAssemblies | Where-Object { $_.Name -eq "nunit.framework" }
-                if ($hasNUnitReference) {
-                  Write-Host "  ✓ NUnit framework reference found (via fallback method)" -ForegroundColor Cyan
-                } else {
-                  Write-Host "  - No NUnit framework reference found, skipping" -ForegroundColor Gray
-                }
-              } catch {
-                Write-Host "  - Could not determine NUnit reference for $($dll.Name), skipping" -ForegroundColor Yellow
-                $hasNUnitReference = $false
-              }
-            }
-            
-            # Skip if no NUnit reference found
-            if (-not $hasNUnitReference) {
-              continue
-            }
-            
-            # If we found NUnit reference, assume it contains tests
-            Write-Host "✓ Found NUnit reference in $($dll.Name) - assuming it contains tests" -ForegroundColor Green
-            $testDlls += @{
-              Name = $dll.BaseName
-              FullPath = $dll.FullName
-              TestCount = "unknown" # We can't determine exact count without dotnet CLI
+            } else {
+              Write-Host "⚠ Could not find DLL file for: $baseName" -ForegroundColor Yellow
             }
           }
           
           if ($testDlls.Count -eq 0) {
-            Write-Host "✗ No test DLLs found in _Tests_ folder" -ForegroundColor Red
+            Write-Host "✗ No test DLL files found matching names in TestDlls.txt" -ForegroundColor Red
             exit 1
           }
           
-          Write-Host "✓ Identified $($testDlls.Count) test DLL(s):"
-          foreach ($testDll in $testDlls) {
-            Write-Host "  - $($testDll.Name) (contains NUnit tests)"
-          }
+          Write-Host "✓ Successfully identified $($testDlls.Count) test DLL(s) with full paths"
           
-          # Convert to JSON for output
+          # Convert to JSON for output (maintaining the same format as before)
           $testDllsJson = $testDlls | ConvertTo-Json -Compress
           echo "test-dlls=$testDllsJson" >> $env:GITHUB_OUTPUT
           
           # Also output just the names for matrix strategy
-          $testDllNames = $testDlls | ForEach-Object { $_.Name }
-          $testDllNamesJson = $testDllNames | ConvertTo-Json -Compress
+          $testDllNamesOnly = $testDlls | ForEach-Object { $_.Name }
+          $testDllNamesJson = $testDllNamesOnly | ConvertTo-Json -Compress
           echo "test-dll-names=$testDllNamesJson" >> $env:GITHUB_OUTPUT
         shell: pwsh
 
