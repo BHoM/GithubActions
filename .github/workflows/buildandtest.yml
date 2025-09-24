@@ -1776,10 +1776,16 @@ jobs:
               }
             }
             
-            # Clean up original TRX files
+            # Clean up original TRX files (only if they're different from the final file)
+            $finalTrxFullPath = (Resolve-Path $finalTrxFile -ErrorAction SilentlyContinue).Path
+            if (-not $finalTrxFullPath) {
+              $finalTrxFullPath = (Get-Item $finalTrxFile -ErrorAction SilentlyContinue).FullName
+            }
+            
             foreach ($originalFile in $trxFilesForDll) {
-              if ($originalFile.FullName -ne $finalTrxFile) {
+              if ($originalFile.FullName -ne $finalTrxFullPath -and (Test-Path $originalFile.FullName)) {
                 Remove-Item $originalFile.FullName -Force
+                Write-Host "  Cleaned up original file: $($originalFile.Name)"
               }
             }
           }
