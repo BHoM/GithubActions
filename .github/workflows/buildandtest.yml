@@ -903,7 +903,7 @@ jobs:
           name: Dependencies
           path: ${{ env.BHoMFolder }}
 
-      - name: Copy libs folder to BHoM assemblies
+      - name: Copy libs folder to BHoM assemblies TO BE DELETED JUST USED FOR TESTING PURPOSES TO GET ACCESS TO BHOM AND BHOM_ENGINE DLLS
         run: |
           if (Test-Path "libs") {
             Write-Host "Found libs folder, copying DLL files to BHoM assemblies..."
@@ -1470,6 +1470,9 @@ jobs:
             Write-Host "Converted $($relativePaths.Count) relative paths to absolute Windows paths"
           }
           
+          # Current repository in org/repo format
+          $currentRepository = '${{ github.repository }}'
+          
           $overallSuccess = $true
           $testResults = @()
           
@@ -1486,7 +1489,7 @@ jobs:
               $updatedAssemblies = Get-Content $updatedAssembliesFile.FullName -Raw
               $updatedAssemblies = $updatedAssemblies.Trim()
               
-              $hasTestParams = $updatedAssemblies -or $changedFiles
+              # Always pass test parameters (CurrentRepository and optional ones)
               
               foreach ($testDll in $testDlls) {
                 Write-Host "Running tests for: $($testDll.Name) (build: $buildConfig)"
@@ -1495,39 +1498,36 @@ jobs:
                 Write-Host "Log file: $logFileName"
                 
                 try {
-                  if ($hasTestParams) {
-                    Write-Host "Running with test parameters for $buildConfig"
-                    # Use Start-Process to avoid PowerShell escaping issues
-                    $processArgs = @(
-                      "test"
-                      "$($testDll.FullPath)"
-                      "--verbosity"
-                      "normal"
-                      "--logger"
-                      "trx;LogFileName=$logFileName"
-                      "--results-directory"
-                      "test-results"
-                    )
-                    
-                    # Add test parameters as separate arguments
-                    $processArgs += "--"
-                    
-                    # Add UpdatedAssemblies parameter if available
-                    if ($updatedAssemblies) {
-                      $processArgs += "TestRunParameters.Parameter(name=`"UpdatedAssemblies`", value=`"$updatedAssemblies`")"
-                    }
-                    
-                    # Add UpdatedFiles parameter if available
-                    if ($changedFiles) {
-                      $processArgs += "TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
-                    }
-                    
-                    Write-Host "Executing: dotnet $($processArgs -join ' ')"
-                    & dotnet @processArgs
-                  } else {
-                    Write-Host "Running without additional parameters for $buildConfig"
-                    dotnet test $($testDll.FullPath) --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
+                  Write-Host "Running with test parameters for $buildConfig"
+                  $processArgs = @(
+                    "test"
+                    "$($testDll.FullPath)"
+                    "--verbosity"
+                    "normal"
+                    "--logger"
+                    "trx;LogFileName=$logFileName"
+                    "--results-directory"
+                    "test-results"
+                  )
+                  
+                  # Add test parameters as separate arguments
+                  $processArgs += "--"
+                  
+                  # Always provide the current repository
+                  $processArgs += "TestRunParameters.Parameter(name=\`"CurrentRepository\`", value=\`"$currentRepository\`")"
+                  
+                  # Add UpdatedAssemblies parameter if available
+                  if ($updatedAssemblies) {
+                    $processArgs += "TestRunParameters.Parameter(name=\`"UpdatedAssemblies\`", value=\`"$updatedAssemblies\`")"
                   }
+                  
+                  # Add UpdatedFiles parameter if available
+                  if ($changedFiles) {
+                    $processArgs += "TestRunParameters.Parameter(name=\`"UpdatedFiles\`", value=\`"$changedFiles\`")"
+                  }
+                  
+                  Write-Host "Executing: dotnet $($processArgs -join ' ')"
+                  & dotnet @processArgs
                   
                   if ($LASTEXITCODE -eq 0) {
                     Write-Host "✓ Tests passed for $($testDll.Name) ($buildConfig)" -ForegroundColor Green
@@ -1548,7 +1548,7 @@ jobs:
               Remove-Item $updatedAssembliesFile.FullName -Force
             }
           } else {
-            Write-Host "No release builds found - running tests without specific assemblies parameters"
+            Write-Host "No release builds found - running tests with parameters"
             
             foreach ($testDll in $testDlls) {
               Write-Host "Running tests for: $($testDll.Name)"
@@ -1557,27 +1557,31 @@ jobs:
               Write-Host "Log file: $logFileName"
               
               try {
+                Write-Host "Running with test parameters"
+                $processArgs = @(
+                  "test"
+                  "$($testDll.FullPath)"
+                  "--verbosity"
+                  "normal"
+                  "--logger"
+                  "trx;LogFileName=$logFileName"
+                  "--results-directory"
+                  "test-results"
+                )
+                
+                # Add test parameters as separate arguments
+                $processArgs += "--"
+                
+                # Always provide the current repository
+                $processArgs += "TestRunParameters.Parameter(name=\`"CurrentRepository\`", value=\`"$currentRepository\`")"
+                
+                # Add UpdatedFiles parameter if available
                 if ($changedFiles) {
-                  Write-Host "Running with changed files parameter only"
-                  $processArgs = @(
-                    "test"
-                    "$($testDll.FullPath)"
-                    "--verbosity"
-                    "normal"
-                    "--logger"
-                    "trx;LogFileName=$logFileName"
-                    "--results-directory"
-                    "test-results"
-                    "--"
-                    "TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
-                  )
-                  
-                  Write-Host "Executing: dotnet $($processArgs -join ' ')"
-                  & dotnet @processArgs
-                } else {
-                  Write-Host "Running without additional parameters"
-                  dotnet test $($testDll.FullPath) --verbosity normal --logger "trx;LogFileName=$logFileName" --results-directory test-results
+                  $processArgs += "TestRunParameters.Parameter(name=\`"UpdatedFiles\`", value=\`"$changedFiles\`")"
                 }
+                
+                Write-Host "Executing: dotnet $($processArgs -join ' ')"
+                & dotnet @processArgs
                 
                 if ($LASTEXITCODE -eq 0) {
                   Write-Host "✓ Tests passed for $($testDll.Name)" -ForegroundColor Green
