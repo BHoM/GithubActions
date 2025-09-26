@@ -1514,16 +1514,16 @@ jobs:
                   $processArgs += "--"
                   
                   # Always provide the current repository
-                  $processArgs += "TestRunParameters.Parameter(name=\""CurrentRepository\"", value=\""$currentRepository\"")"
+                  $processArgs += "TestRunParameters.Parameter(name=`"CurrentRepository`", value=`"$currentRepository`")"
                   
                   # Add UpdatedAssemblies parameter if available
                   if ($updatedAssemblies) {
-                    $processArgs += "TestRunParameters.Parameter(name=\""UpdatedAssemblies\"", value=\""$updatedAssemblies\"")"
+                    $processArgs += "TestRunParameters.Parameter(name=`"UpdatedAssemblies`", value=`"$updatedAssemblies`")"
                   }
                   
                   # Add UpdatedFiles parameter if available
                   if ($changedFiles) {
-                    $processArgs += "TestRunParameters.Parameter(name=\""UpdatedFiles\"", value=\""$changedFiles\"")"
+                    $processArgs += "TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
                   }
                   
                   Write-Host "Executing: dotnet $($processArgs -join ' ')"
@@ -1573,11 +1573,11 @@ jobs:
                 $processArgs += "--"
                 
                 # Always provide the current repository
-                $processArgs += "TestRunParameters.Parameter(name=\""CurrentRepository\"", value=\""$currentRepository\"")"
+                $processArgs += "TestRunParameters.Parameter(name=`"CurrentRepository`", value=`"$currentRepository`")"
                 
                 # Add UpdatedFiles parameter if available
                 if ($changedFiles) {
-                  $processArgs += "TestRunParameters.Parameter(name=\""UpdatedFiles\"", value=\""$changedFiles\"")"
+                  $processArgs += "TestRunParameters.Parameter(name=`"UpdatedFiles`", value=`"$changedFiles`")"
                 }
                 
                 Write-Host "Executing: dotnet $($processArgs -join ' ')"
